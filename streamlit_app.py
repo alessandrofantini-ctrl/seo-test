@@ -11,20 +11,20 @@ st.set_page_config(page_title="SEO Outline Generator", layout="centered")
 st.title("SEO Header Analyzer")
 st.markdown("Genera una struttura di header tag ottimizzata analizzando la SERP e i competitor.")
 
-# --- SIDEBAR PER LE API KEY (Per sicurezza su Streamlit Cloud) ---
+# --- SIDEBAR PER LE API KEY ---
 with st.sidebar:
     st.header("Configurazione API")
     openai_api_key = st.text_input("OpenAI API Key", type="password")
     serp_api_key = st.text_input("SerpApi Key", type="password")
     
-    # Se le chiavi sono salvate nei secrets di Streamlit, usale come fallback
+    # Fallback sui Secrets di Streamlit
     if not openai_api_key and "OPENAI_API_KEY" in st.secrets:
         openai_api_key = st.secrets["OPENAI_API_KEY"]
     if not serp_api_key and "SERP_API_KEY" in st.secrets:
         serp_api_key = st.secrets["SERP_API_KEY"]
 
 # --- INPUT UTENTE ---
-keyword = st.text_input("Inserisci keyword...", placeholder="Es. manutenzione cambio automatico")
+keyword = st.text_input("Inserisci keyword...", placeholder="Es. riorganizzazione aziendale")
 
 # --- FUNZIONI DI UTILITÀ ---
 
@@ -35,47 +35,36 @@ def get_serp_data(query, api_key):
         "q": query,
         "api_key": api_key,
         "hl": "it",
-        "gl": "it" # Geolocalizzazione Italia
+        "gl": "it"
     }
-    
     try:
-        response = requests.get("https://serpapi.com/search", params=params)
+        response = requests.get("https://serpapi.com/search", params=params, timeout=20)
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        st.error(f"Errore SerpApi: {e}")
+        st.error(f"Errore durante la chiamata a SerpApi: {e}")
         return None
 
 def scrape_competitor_structure(url):
     """Estrae H1, H2, H3 da un URL."""
     headers_list = []
-    
-    # User Agent per simulare un browser reale (come nel codice C#)
     ua = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    
     try:
-        # Timeout breve per non bloccare l'app troppo a lungo
         resp = requests.get(url, headers=ua, timeout=10)
         resp.raise_for_status()
-        
         soup = BeautifulSoup(resp.text, 'html.parser')
         
-        # Trova tutti gli header h1, h2, h3
         elements = soup.find_all(['h1', 'h2', 'h3'])
-        
         if elements:
             headers_list.append(f"\n--- STRUTTURA SITO: {url} ---")
-            # Prendi solo i primi 15 header come nel codice originale
-            for tag in elements[:15]:
+            for tag in elements[:15]: # Prendi max 15 header per sito
                 text = tag.get_text(strip=True)
                 if text:
                     headers_list.append(f"[{tag.name.upper()}] {text}")
-                    
         return headers_list
     except Exception:
-        # Ignora errori su singoli siti (timeout, 403, ecc.)
         return []
 
 # --- LOGICA PRINCIPALE ---
@@ -84,105 +73,102 @@ if st.button("Genera Scaletta"):
     if not keyword:
         st.warning("Inserisci una keyword per procedere.")
     elif not openai_api_key or not serp_api_key:
-        st.error("Mancano le API Key. Inseriscile nella sidebar.")
+        st.error("Mancano le API Key. Inseriscile nella sidebar o nei Secrets.")
     else:
-        # Container per mostrare lo stato di avanzamento
-        status_text = st.empty()
+        # Placeholder per lo stato
+        status_box = st.status("Inizio analisi...", expanded=True)
         
         try:
-            # 1. RECUPERO DATI DA SERPAPI
-            status_text.info("🔍 Analisi SERP in corso (SerpApi)...")
-            
+            # 1. SERPAPI
+            status_box.write("🔍 Interrogazione Google (SerpApi)...")
             serp_data = get_serp_data(keyword, serp_api_key)
             
-            if serp_data:
-                info_per_ai = []
-                urls_to_scrape = []
-                
-                # People Also Ask
-                if "related_questions" in serp_data:
-                    paa = [q.get("question") for q in serp_data["related_questions"]]
-                    info_per_ai.append(f"DOMANDE UTENTI (PAA): {', '.join(paa)}")
-                
-                # Ricerche Correlate
-                if "related_searches" in serp_data:
-                    related = [r.get("query") for r in serp_data["related_searches"]]
-                    info_per_ai.append(f"RICERCHE CORRELATE: {', '.join(related)}")
-                
-                # Risultati Organici (Prendiamo i primi 5 link)
-                if "organic_results" in serp_data:
-                    urls_to_scrape = [res.get("link") for res in serp_data["organic_results"][:5]]
+            if not serp_data:
+                status_box.update(label="Errore SerpApi", state="error")
+                st.stop()
 
-                # 2. SCRAPING COMPETITOR
-                status_text.info(f"🕷️ Scraping di {len(urls_to_scrape)} siti competitor...")
-                
-                strutture_competitor = []
-                progress_bar = st.progress(0)
-                
-                for i, url in enumerate(urls_to_scrape):
-                    # Aggiorna progress bar
-                    progress_bar.progress((i + 1) / len(urls_to_scrape))
-                    
-                    extracted_headers = scrape_competitor_structure(url)
-                    strutture_competitor.extend(extracted_headers)
-                    time.sleep(0.5) # Piccola pausa per cortesia
-                
-                progress_bar.empty()
+            # Preparazione dati
+            info_per_ai = []
+            urls_to_scrape = []
+            
+            if "related_questions" in serp_data:
+                paa = [q.get("question") for q in serp_data["related_questions"]]
+                info_per_ai.append(f"DOMANDE PAA: {', '.join(paa)}")
+            
+            if "organic_results" in serp_data:
+                urls_to_scrape = [res.get("link") for res in serp_data["organic_results"][:5]]
 
-                # 3. GENERAZIONE CON OPENAI
-                status_text.info("🤖 L'AI sta creando la tua scaletta ottimizzata...")
-                
-                client = OpenAI(api_key=openai_api_key)
-                
-                sito_target = "https://www.dieselcarbyfinazzi.it/"
-                testo_domande = "\n".join(info_per_ai)
-                testo_competitor = "\n".join(strutture_competitor)
-                
-                prompt_sistema = "Sei un SEO Specialist esperto di copywriting e ottimizzazione contenuti. Il tuo obiettivo è creare una struttura di header tag dettagliata per il sito https://www.dieselcarbyfinazzi.it/."
-                
-                prompt_utente = f"""### CONTESTO SEO
-Obiettivo: Generare la struttura degli Header Tag (H1-H4) per un nuovo articolo.
-Keyword Principale: "{keyword}"
+            # 2. SCRAPING
+            status_box.write(f"🕷️ Scraping di {len(urls_to_scrape)} competitor...")
+            strutture_competitor = []
+            
+            my_bar = status_box.empty() # Barra di progresso interna allo status
+            prog_bar = my_bar.progress(0)
+
+            for i, url in enumerate(urls_to_scrape):
+                prog_bar.progress((i + 1) / len(urls_to_scrape))
+                extracted = scrape_competitor_structure(url)
+                strutture_competitor.extend(extracted)
+                time.sleep(0.2)
+            
+            my_bar.empty() # Rimuovi barra progresso
+
+            # 3. OPENAI
+            status_box.write("🤖 Generazione scaletta con AI...")
+            
+            # Preparazione Prompt
+            sito_target = "https://www.dieselcarbyfinazzi.it/"
+            testo_domande = "\n".join(info_per_ai)
+            testo_competitor_raw = "\n".join(strutture_competitor)
+            
+            # --- PROTEZIONE ERRORI DI CONNESSIONE ---
+            # Se il testo è troppo lungo, OpenAI va in timeout o errore. Tagliamolo a 15k caratteri.
+            if len(testo_competitor_raw) > 15000:
+                testo_competitor = testo_competitor_raw[:15000] + "\n...[Testo troncato per limiti di lunghezza]..."
+            else:
+                testo_competitor = testo_competitor_raw
+
+            prompt_sistema = "Sei un SEO Specialist esperto. Crea una struttura H1-H4 dettagliata."
+            prompt_utente = f"""### CONTESTO
+Keyword: "{keyword}"
 Sito Target: {sito_target}
 
-### ANALISI DATI SERP
-Di seguito trovi le domande frequenti e le tendenze estratte da Google:
+### DATI SERP
 {testo_domande}
 
-### ANALISI COMPETITOR
-Ecco la struttura degli header dei siti attualmente posizionati:
+### COMPETITOR (Struttura H-TAG)
 {testo_competitor}
 
-### DIRETTIVE DI SCRITTURA
-- Crea un H1 magnetico che includa la keyword principale.
-- Organizza i paragrafi H2 in modo logico per rispondere all'intento di ricerca.
-- Usa H3 e H4 per approfondire dettagli tecnici o rispondere a FAQ specifiche.
-- Assicurati che la struttura sia superiore a quella dei competitor analizzati.
-
-### FORMATO OUTPUT
-Restituisci solo la struttura gerarchica (H1, H2, H3, H4) e una breve conclusione.
+### OBIETTIVO
+Crea una scaletta ottimizzata (H1, H2, H3, H4) superiore ai competitor.
+Restituisci solo la struttura e una breve conclusione.
 """
 
+            # Chiamata specifica a OpenAI con gestione errori dedicata
+            try:
+                client = OpenAI(api_key=openai_api_key)
                 response = client.chat.completions.create(
                     model="gpt-4o",
                     messages=[
                         {"role": "system", "content": prompt_sistema},
                         {"role": "user", "content": prompt_utente}
-                    ]
+                    ],
+                    timeout=45 # Timeout esplicito aumentato
                 )
                 
                 risultato_ai = response.choices[0].message.content
                 
-                # Pulizia UI finale
-                status_text.success("Generazione completata!")
+                status_box.update(label="Analisi Completata!", state="complete", expanded=False)
                 
-                # Output
                 st.markdown("### 📝 Scaletta Generata")
                 st.markdown("---")
                 st.markdown(risultato_ai)
-                
-            else:
-                status_text.error("Nessun dato ricevuto da SerpApi.")
-                
-        except Exception as e:
-            status_text.error(f"Si è verificato un errore generale: {str(e)}")
+
+            except Exception as e_ai:
+                status_box.update(label="Errore AI", state="error")
+                st.error(f"❌ Errore durante la comunicazione con OpenAI: {e_ai}")
+                st.info("Suggerimento: Controlla che la API Key sia corretta e di avere credito sufficiente.")
+
+        except Exception as e_gen:
+            status_box.update(label="Errore Generale", state="error")
+            st.error(f"Errore imprevisto: {e_gen}")
