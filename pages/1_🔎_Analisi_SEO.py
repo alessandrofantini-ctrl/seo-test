@@ -169,13 +169,12 @@ if st.button("Avvia Analisi Completa"):
                 status.update(label="Strategia Pronta!", state="complete", expanded=False)
                 st.markdown(output)
                 
-# ... (verso la fine di pages/1_🔎_Analisi_SEO.py)
-
-st.session_state['ultimo_brief'] = output
-# AGGIUNGI QUESTA RIGA SOTTO:
-st.session_state['client_url_session'] = client_url # Salva l'URL per la pagina successiva
-
-st.success("✅ Brief salvato! Vai alla pagina 'Redattore Articoli'...")
+                # --- SALVATAGGIO PER PAGINA 2 ---
+                # Salviamo sia il brief che l'URL del cliente
+                st.session_state['ultimo_brief'] = output
+                st.session_state['client_url_session'] = client_url 
+                
+                st.success("✅ Brief salvato! Vai alla pagina 'Redattore Articoli' per generare il testo.")
                 
                 docx = create_docx(output, keyword)
                 st.download_button("📥 Scarica Brief .docx", docx, f"brief_{keyword.replace(' ','_')}.docx")
