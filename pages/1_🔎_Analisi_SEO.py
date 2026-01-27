@@ -16,7 +16,6 @@ with st.sidebar:
     openai_api_key = st.text_input("OpenAI Key", type="password")
     serp_api_key = st.text_input("SerpApi Key", type="password")
     
-    # Fallback Secrets (se presenti su Streamlit Cloud)
     if not openai_api_key and "OPENAI_API_KEY" in st.secrets:
         openai_api_key = st.secrets["OPENAI_API_KEY"]
     if not serp_api_key and "SERP_API_KEY" in st.secrets:
@@ -24,15 +23,12 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("🎯 Target Cliente")
-    # NUOVI CAMPI CONTESTO
     client_url = st.text_input("URL Sito Cliente (Opzionale)", placeholder="https://www.tuosito.it")
-    custom_usp = st.text_area("USP / Punti di Forza", placeholder="Es. Officina autorizzata Bosch, Auto sostitutiva gratuita, Aperti il sabato...", height=100)
-    
+    custom_usp = st.text_area("USP / Punti di Forza", placeholder="Es. Officina autorizzata Bosch...", height=100)
     tone_of_voice = st.selectbox("Tono di Voce", ["Autorevole & Tecnico", "Empatico & Problem Solving", "Diretto & Commerciale"])
 
 # --- MAIN PAGE ---
-st.title("🚀 SEO Brief Generator con Brand Identity")
-st.markdown("Analizza SERP, Competitor e **Brand del Cliente** per creare contenuti unici.")
+st.title("🚀 SEO Brief Generator")
 
 col1, col2 = st.columns([3, 1])
 with col1:
@@ -51,27 +47,19 @@ def get_serp_data(query, api_key):
         return None
 
 def scrape_site_content(url, is_client=False):
-    """Estrae contenuto per analisi. Se è il cliente, cerca di capire chi è."""
     ua = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
     data = {"url": url, "headers": [], "text_sample": "", "title": ""}
-    
     try:
         resp = requests.get(url, headers=ua, timeout=10)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, 'html.parser')
-        
         data["title"] = soup.title.string.strip() if soup.title else "N/A"
-        
-        # Estrae Headers
         elements = soup.find_all(['h1', 'h2', 'h3'])
         for tag in elements[:15]:
             data["headers"].append(f"[{tag.name.upper()}] {tag.get_text(strip=True)}")
-            
-        # Estrae un campione di testo per capire il contenuto (utile per USP cliente)
         paragraphs = soup.find_all('p')
-        text_content = " ".join([p.get_text(strip=True) for p in paragraphs[:10]]) # Primi 10 paragrafi
-        data["text_sample"] = text_content[:1500] # Limita caratteri
-        
+        text_content = " ".join([p.get_text(strip=True) for p in paragraphs[:10]])
+        data["text_sample"] = text_content[:1500]
         return data
     except Exception:
         return None
@@ -90,79 +78,51 @@ if st.button("Avvia Analisi Completa"):
         st.error("Inserisci Keyword e API Keys.")
     else:
         status = st.status("Avvio motori di ricerca...", expanded=True)
-        
         try:
-            # 1. ANALISI CLIENTE (NUOVO STEP)
+            # 1. ANALISI CLIENTE
             client_context_str = "Nessun sito cliente fornito."
             if client_url:
                 status.write("🏢 Analisi identità cliente...")
                 client_data = scrape_site_content(client_url, is_client=True)
                 if client_data:
-                    client_context_str = f"""
-                    SITO CLIENTE: {client_url}
-                    META TITLE: {client_data['title']}
-                    CONTENUTO RILEVATO: {client_data['text_sample']}
-                    """
-            
-            # Aggiungi le USP manuali se presenti
+                    client_context_str = f"SITO CLIENTE: {client_url}\nMETA: {client_data['title']}\nTESTO: {client_data['text_sample']}"
             if custom_usp:
-                client_context_str += f"\nPUNTI DI FORZA MANUALI (USP): {custom_usp}"
+                client_context_str += f"\nUSP MANUALI: {custom_usp}"
 
             # 2. SERP
             status.write("🔍 Analisi SERP Google...")
             serp = get_serp_data(keyword, serp_api_key)
             
             if serp and "organic_results" in serp:
-                urls = [res["link"] for res in serp["organic_results"][:4]] # Primi 4
+                urls = [res["link"] for res in serp["organic_results"][:4]]
                 paa = [q["question"] for q in serp.get("related_questions", [])]
                 
-                # 3. SCRAPING COMPETITOR
+                # 3. COMPETITOR
                 status.write("⚔️ Spionaggio Competitor...")
                 competitor_text = ""
-                
                 bar = status.empty()
                 prog = bar.progress(0)
-                
                 for i, url in enumerate(urls):
                     prog.progress((i+1)/len(urls))
                     c_data = scrape_site_content(url)
                     if c_data:
                         competitor_text += f"\n--- COMPETITOR: {url} ---\n{c_data['title']}\n" + "\n".join(c_data['headers'])
                     time.sleep(0.1)
-                
                 bar.empty()
                 
-                # 4. AI STRATEGY
+                # 4. AI
                 status.write("🧠 Elaborazione Brief Strategico...")
-                
                 system_prompt = "Sei un Head of SEO. Crei brief editoriali che posizionano E convertono."
-                
                 user_prompt = f"""
-                ### OBIETTIVO
-                Creare la struttura perfetta per un articolo sulla keyword: "{keyword}".
-                Intento: {target_intent}.
-                Tono: {tone_of_voice}.
+                OBIETTIVO: SEO Brief per "{keyword}". Intento: {target_intent}. Tono: {tone_of_voice}.
+                CLIENTE: {client_context_str}
+                COMPETITOR: {competitor_text[:10000]}
+                PAA: {", ".join(paa)}
                 
-                ### IL NOSTRO CLIENTE (Chi siamo)
-                Analizza queste info per capire i nostri punti di forza e integrarli nella scaletta:
-                {client_context_str}
-                
-                ### I COMPETITOR (Chi dobbiamo battere)
-                {competitor_text[:10000]}
-                
-                ### DOMANDE UTENTI (PAA)
-                {", ".join(paa)}
-                
-                ### ISTRUZIONI OUTPUT
-                Genera un SEO Brief strutturato così:
-                
-                1. **Concept Strategico**: Come ci differenziamo dai competitor analizzati? (Sfrutta le info del cliente).
-                2. **Targeting**: A chi stiamo parlando?
-                3. **Struttura Outline (H1, H2, H3)**:
-                - H1 Ottimizzato.
-                - Per ogni H2, scrivi una "Direttiva per il Copywriter" spiegando cosa scrivere e QUALE USP del cliente citare in quel punto.
-                - Inserisci CTA (Call to Action) strategiche basate sui servizi del cliente.
-                
+                OUTPUT:
+                1. Concept Strategico & Gap Analysis.
+                2. Target.
+                3. Struttura H1, H2, H3 con direttive copywriter e USP cliente.
                 Usa Markdown.
                 """
                 
@@ -174,24 +134,19 @@ if st.button("Avvia Analisi Completa"):
                 output = resp.choices[0].message.content
                 
                 status.update(label="Strategia Pronta!", state="complete", expanded=False)
-                
                 st.markdown(output)
-
-
-# --- MODIFICA PER PASSARE I DATI ALLA PAGINA 2 ---
-# Salviamo il brief nella memoria di sessione di Streamlit
-st.session_state['ultimo_brief'] = output
-st.success("✅ Brief salvato in memoria! Vai alla pagina 'Redattore Articoli' per generare il testo.")
-
                 
-                # Download
+                # --- SALVATAGGIO PER PAGINA 2 ---
+                st.session_state['ultimo_brief'] = output
+                st.success("✅ Brief salvato! Vai alla pagina 'Redattore Articoli' per generare il testo.")
+                
                 docx = create_docx(output, keyword)
                 st.download_button("📥 Scarica Brief .docx", docx, f"brief_{keyword.replace(' ','_')}.docx")
             
             else:
                 status.update(label="Errore SerpApi", state="error")
-                st.error("Nessun dato trovato da Google. Verifica la SerpApi Key.")
+                st.error("Nessun dato trovato da Google.")
 
         except Exception as e:
             status.update(label="Errore", state="error")
-            st.error(f"Si è verificato un errore: {e}")
+            st.error(f"Errore: {e}")
