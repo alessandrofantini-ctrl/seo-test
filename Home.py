@@ -8,9 +8,8 @@ st.set_page_config(
 )
 
 # --- HEADER CON LOGO E TITOLO ---
-# Se hai un logo online, sostituisci l'URL qui sotto. 
-# Altrimenti puoi usare st.image("logo.png") se carichi il file nel repository.
-st.image("https://via.placeholder.com/600x150.png?text=Lumi+Company+SEO+Tools", use_column_width=True)
+# Qui inseriamo il logo SVG ufficiale di Lumi Company
+st.image("https://www.lumicompany.it/_next/static/media/lumi_logo_black.b03993c0.svg", width=300)
 
 st.title("✨ Lumi Company AI Suite")
 st.markdown("### Gli strumenti ufficiali per la strategia SEO di [www.lumicompany.it](https://www.lumicompany.it)")
@@ -38,6 +37,3 @@ st.markdown(
     <div style='text-align: center; color: grey; font-size: small;'>
         Developed for <b>Lumi Company</b> | Powered by OpenAI & Streamlit
     </div>
-    """,
-    unsafe_allow_html=True
-)
