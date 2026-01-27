@@ -29,6 +29,7 @@ with st.sidebar:
 
 # --- MAIN PAGE ---
 st.title("🚀 SEO Brief Generator")
+st.markdown("Analizza SERP, PAA e Competitor per creare una strategia editoriale **semanticamente completa**.")
 
 col1, col2 = st.columns([3, 1])
 with col1:
@@ -80,7 +81,7 @@ if st.button("Avvia Analisi Completa"):
         status = st.status("Avvio motori di ricerca...", expanded=True)
         try:
             # 1. ANALISI CLIENTE
-            client_context_str = "Nessun sito cliente fornito."
+            client_context_str = "Nessun sito cliente fornito. (Generico)"
             if client_url:
                 status.write("🏢 Analisi identità cliente...")
                 client_data = scrape_site_content(client_url, is_client=True)
@@ -95,7 +96,12 @@ if st.button("Avvia Analisi Completa"):
             
             if serp and "organic_results" in serp:
                 urls = [res["link"] for res in serp["organic_results"][:4]]
-                paa = [q["question"] for q in serp.get("related_questions", [])]
+                
+                # ESTRAZIONE PAA (People Also Ask)
+                paa = [q.get("question") for q in serp.get("related_questions", [])]
+                
+                # ESTRAZIONE RICERCHE CORRELATE (Fondamentale per la semantica)
+                related_searches = [r.get("query") for r in serp.get("related_searches", [])]
                 
                 # 3. COMPETITOR
                 status.write("⚔️ Spionaggio Competitor...")
@@ -110,26 +116,53 @@ if st.button("Avvia Analisi Completa"):
                     time.sleep(0.1)
                 bar.empty()
                 
-                # 4. AI
-                status.write("🧠 Elaborazione Brief Strategico...")
-                system_prompt = "Sei un Head of SEO. Crei brief editoriali che posizionano E convertono."
-                user_prompt = f"""
-                OBIETTIVO: SEO Brief per "{keyword}". Intento: {target_intent}. Tono: {tone_of_voice}.
-                CLIENTE: {client_context_str}
-                COMPETITOR: {competitor_text[:10000]}
-                PAA: {", ".join(paa)}
+                # 4. AI STRATEGY
+                status.write("🧠 Elaborazione Mappa Semantica & Brief...")
                 
-                OUTPUT:
-                1. Concept Strategico & Gap Analysis.
-                2. Target.
-                3. Struttura H1, H2, H3 con direttive copywriter e USP cliente.
-                Usa Markdown.
+                system_prompt = "Sei un Senior SEO Strategist. Il tuo obiettivo è creare un contenuto 'Skyscraper': più completo, approfondito e utile di qualsiasi competitor."
+                
+                user_prompt = f"""
+                OBIETTIVO: Creare il Brief SEO definitivo per la keyword: "{keyword}".
+                INTENTO: {target_intent}.
+                TONO: {tone_of_voice}.
+                
+                ### DATI DI ANALISI (INPUT)
+                
+                1. IL NOSTRO BRAND (Contesto):
+                {client_context_str}
+                
+                2. I COMPETITOR (Struttura attuale in SERP):
+                {competitor_text[:8000]}
+                
+                3. BISOGNI UTENTE (People Also Ask):
+                {", ".join(paa) if paa else "Nessuna domanda specifica rilevata."}
+                
+                4. ARGOMENTI CORRELATI (Related Searches - Da coprire per rilevanza topica):
+                {", ".join(related_searches) if related_searches else "Nessuna correlata rilevata."}
+                
+                ### TASK: GENERA IL BRIEF
+                
+                Devi restituire un output strutturato in Markdown che includa:
+                
+                **SEZIONE A: ANALISI SEMANTICA**
+                - **Primary Keyword**: {keyword}
+                - **Keywords Secondarie & Entità**: Elenca 5-10 termini/concetti che DEVONO apparire nel testo (basandoti sulle Ricerche Correlate e PAA) per coprire l'argomento a 360°.
+                - **Gap Analysis**: Cosa manca ai competitor? Cosa possiamo aggiungere noi per vincere?
+                
+                **SEZIONE B: STRUTTURA DEL CONTENUTO (Outline)**
+                Crea una scaletta (H1, H2, H3) dettagliata.
+                - **H1**: Deve essere accattivante e contenere la keyword.
+                - **H2/H3**: Usa le PAA e le Ricerche Correlate come titoli dei paragrafi. Esempio: Se PAA è "Quanto costa X?", crea un H2 "Costi e Prezzi di X".
+                - **Istruzioni Copy**: Per OGNI H2, scrivi cosa trattare. Integra le USP del cliente dove pertinente.
+                - **Link Interni/Esterni**: Suggerisci dove inserire link a risorse autorevoli o servizi del cliente.
+                - **FAQ**: Includi una sezione finale con le domande PAA non trattate nel testo.
                 """
                 
                 client = OpenAI(api_key=openai_api_key)
                 resp = client.chat.completions.create(
                     model="gpt-4o",
-                    messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+                    messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+                    temperature=0.7
                 )
                 output = resp.choices[0].message.content
                 
@@ -145,7 +178,7 @@ if st.button("Avvia Analisi Completa"):
             
             else:
                 status.update(label="Errore SerpApi", state="error")
-                st.error("Nessun dato trovato da Google.")
+                st.error("Nessun dato trovato da Google. Verifica la SerpApi Key.")
 
         except Exception as e:
             status.update(label="Errore", state="error")
