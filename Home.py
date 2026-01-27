@@ -37,3 +37,6 @@ st.markdown(
     <div style='text-align: center; color: grey; font-size: small;'>
         Developed for <b>Lumi Company</b> | Powered by OpenAI & Streamlit
     </div>
+    """,
+    unsafe_allow_html=True
+)
