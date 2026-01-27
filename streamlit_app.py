@@ -3,172 +3,183 @@ import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
 import time
+from docx import Document
+from io import BytesIO
 
-# --- CONFIGURAZIONE PAGINA ---
-st.set_page_config(page_title="SEO Outline Generator", layout="centered")
+# --- CONFIGURAZIONE ---
+st.set_page_config(page_title="SEO Content Strategist Pro", layout="wide")
 
-# --- TITOLO ---
-st.title("SEO Header Analyzer")
-st.markdown("Genera una struttura di header tag ottimizzata analizzando la SERP e i competitor.")
-
-# --- SIDEBAR PER LE API KEY ---
+# --- SIDEBAR ---
 with st.sidebar:
-    st.header("Configurazione API")
-    openai_api_key = st.text_input("OpenAI API Key", type="password")
+    st.title("⚙️ SEO Settings")
+    
+    openai_api_key = st.text_input("OpenAI Key", type="password")
     serp_api_key = st.text_input("SerpApi Key", type="password")
     
-    # Fallback sui Secrets di Streamlit
+    # Fallback Secrets
     if not openai_api_key and "OPENAI_API_KEY" in st.secrets:
         openai_api_key = st.secrets["OPENAI_API_KEY"]
     if not serp_api_key and "SERP_API_KEY" in st.secrets:
         serp_api_key = st.secrets["SERP_API_KEY"]
 
-# --- INPUT UTENTE ---
-keyword = st.text_input("Inserisci keyword...", placeholder="Es. riorganizzazione aziendale")
+    st.markdown("---")
+    st.subheader("🎯 Target Cliente")
+    # NUOVI CAMPI CONTESTO
+    client_url = st.text_input("URL Sito Cliente (Opzionale)", placeholder="https://www.tuosito.it")
+    custom_usp = st.text_area("USP / Punti di Forza", placeholder="Es. Officina autorizzata Bosch, Auto sostitutiva gratuita, Aperti il sabato...", height=100)
+    
+    tone_of_voice = st.selectbox("Tono di Voce", ["Autorevole & Tecnico", "Empatico & Problem Solving", "Diretto & Commerciale"])
 
-# --- FUNZIONI DI UTILITÀ ---
+# --- MAIN PAGE ---
+st.title("🚀 SEO Brief Generator con Brand Identity")
+st.markdown("Analizza SERP, Competitor e **Brand del Cliente** per creare contenuti unici.")
 
+col1, col2 = st.columns([3, 1])
+with col1:
+    keyword = st.text_input("Keyword Principale", placeholder="Es. manutenzione cambio automatico")
+with col2:
+    target_intent = st.selectbox("Intento", ["Informativo", "Commerciale", "Navigazionale"])
+
+# --- FUNZIONI ---
 def get_serp_data(query, api_key):
-    """Recupera i dati da SerpApi."""
-    params = {
-        "engine": "google",
-        "q": query,
-        "api_key": api_key,
-        "hl": "it",
-        "gl": "it"
-    }
+    params = {"engine": "google", "q": query, "api_key": api_key, "hl": "it", "gl": "it"}
     try:
         response = requests.get("https://serpapi.com/search", params=params, timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e:
-        st.error(f"Errore durante la chiamata a SerpApi: {e}")
+    except Exception:
         return None
 
-def scrape_competitor_structure(url):
-    """Estrae H1, H2, H3 da un URL."""
-    headers_list = []
-    ua = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+def scrape_site_content(url, is_client=False):
+    """Estrae contenuto per analisi. Se è il cliente, cerca di capire chi è."""
+    ua = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    data = {"url": url, "headers": [], "text_sample": "", "title": ""}
+    
     try:
         resp = requests.get(url, headers=ua, timeout=10)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, 'html.parser')
         
-        elements = soup.find_all(['h1', 'h2', 'h3'])
-        if elements:
-            headers_list.append(f"\n--- STRUTTURA SITO: {url} ---")
-            for tag in elements[:15]: # Prendi max 15 header per sito
-                text = tag.get_text(strip=True)
-                if text:
-                    headers_list.append(f"[{tag.name.upper()}] {text}")
-        return headers_list
-    except Exception:
-        return []
-
-# --- LOGICA PRINCIPALE ---
-
-if st.button("Genera Scaletta"):
-    if not keyword:
-        st.warning("Inserisci una keyword per procedere.")
-    elif not openai_api_key or not serp_api_key:
-        st.error("Mancano le API Key. Inseriscile nella sidebar o nei Secrets.")
-    else:
-        # Placeholder per lo stato
-        status_box = st.status("Inizio analisi...", expanded=True)
+        data["title"] = soup.title.string.strip() if soup.title else "N/A"
         
-        try:
-            # 1. SERPAPI
-            status_box.write("🔍 Interrogazione Google (SerpApi)...")
-            serp_data = get_serp_data(keyword, serp_api_key)
+        # Estrae Headers
+        elements = soup.find_all(['h1', 'h2', 'h3'])
+        for tag in elements[:15]:
+            data["headers"].append(f"[{tag.name.upper()}] {tag.get_text(strip=True)}")
             
-            if not serp_data:
-                status_box.update(label="Errore SerpApi", state="error")
-                st.stop()
+        # Estrae un campione di testo per capire il contenuto (utile per USP cliente)
+        paragraphs = soup.find_all('p')
+        text_content = " ".join([p.get_text(strip=True) for p in paragraphs[:10]]) # Primi 10 paragrafi
+        data["text_sample"] = text_content[:1500] # Limita caratteri
+        
+        return data
+    except Exception:
+        return None
 
-            # Preparazione dati
-            info_per_ai = []
-            urls_to_scrape = []
+def create_docx(content, kw):
+    doc = Document()
+    doc.add_heading(f'SEO Brief: {kw}', 0)
+    doc.add_paragraph(content)
+    bio = BytesIO()
+    doc.save(bio)
+    return bio
+
+# --- LOGICA ---
+if st.button("Avvia Analisi Completa"):
+    if not keyword or not openai_api_key or not serp_api_key:
+        st.error("Inserisci Keyword e API Keys.")
+    else:
+        status = st.status("Avvio motori di ricerca...", expanded=True)
+        
+        # 1. ANALISI CLIENTE (NUOVO STEP)
+        client_context_str = "Nessun sito cliente fornito."
+        if client_url:
+            status.write("🏢 Analisi identità cliente...")
+            client_data = scrape_site_content(client_url, is_client=True)
+            if client_data:
+                client_context_str = f"""
+                SITO CLIENTE: {client_url}
+                META TITLE: {client_data['title']}
+                CONTENUTO RILEVATO: {client_data['text_sample']}
+                """
+        
+        # Aggiungi le USP manuali se presenti
+        if custom_usp:
+            client_context_str += f"\nPUNTI DI FORZA MANUALI (USP): {custom_usp}"
+
+        # 2. SERP
+        status.write("🔍 Analisi SERP Google...")
+        serp = get_serp_data(keyword, serp_api_key)
+        
+        if serp and "organic_results" in serp:
+            urls = [res["link"] for res in serp["organic_results"][:4]] # Primi 4
+            paa = [q["question"] for q in serp.get("related_questions", [])]
             
-            if "related_questions" in serp_data:
-                paa = [q.get("question") for q in serp_data["related_questions"]]
-                info_per_ai.append(f"DOMANDE PAA: {', '.join(paa)}")
+            # 3. SCRAPING COMPETITOR
+            status.write("⚔️ Spionaggio Competitor...")
+            competitor_text = ""
             
-            if "organic_results" in serp_data:
-                urls_to_scrape = [res.get("link") for res in serp_data["organic_results"][:5]]
-
-            # 2. SCRAPING
-            status_box.write(f"🕷️ Scraping di {len(urls_to_scrape)} competitor...")
-            strutture_competitor = []
+            bar = status.empty()
+            prog = bar.progress(0)
             
-            my_bar = status_box.empty() # Barra di progresso interna allo status
-            prog_bar = my_bar.progress(0)
-
-            for i, url in enumerate(urls_to_scrape):
-                prog_bar.progress((i + 1) / len(urls_to_scrape))
-                extracted = scrape_competitor_structure(url)
-                strutture_competitor.extend(extracted)
-                time.sleep(0.2)
+            for i, url in enumerate(urls):
+                prog.progress((i+1)/len(urls))
+                c_data = scrape_site_content(url)
+                if c_data:
+                    competitor_text += f"\n--- COMPETITOR: {url} ---\n{c_data['title']}\n" + "\n".join(c_data['headers'])
+                time.sleep(0.1)
             
-            my_bar.empty() # Rimuovi barra progresso
-
-            # 3. OPENAI
-            status_box.write("🤖 Generazione scaletta con AI...")
+            bar.empty()
             
-            # Preparazione Prompt
-            sito_target = "https://www.dieselcarbyfinazzi.it/"
-            testo_domande = "\n".join(info_per_ai)
-            testo_competitor_raw = "\n".join(strutture_competitor)
+            # 4. AI STRATEGY
+            status.write("🧠 Elaborazione Brief Strategico...")
             
-            # --- PROTEZIONE ERRORI DI CONNESSIONE ---
-            # Se il testo è troppo lungo, OpenAI va in timeout o errore. Tagliamolo a 15k caratteri.
-            if len(testo_competitor_raw) > 15000:
-                testo_competitor = testo_competitor_raw[:15000] + "\n...[Testo troncato per limiti di lunghezza]..."
-            else:
-                testo_competitor = testo_competitor_raw
-
-            prompt_sistema = "Sei un SEO Specialist esperto. Crea una struttura H1-H4 dettagliata."
-            prompt_utente = f"""### CONTESTO
-Keyword: "{keyword}"
-Sito Target: {sito_target}
-
-### DATI SERP
-{testo_domande}
-
-### COMPETITOR (Struttura H-TAG)
-{testo_competitor}
-
-### OBIETTIVO
-Crea una scaletta ottimizzata (H1, H2, H3, H4) superiore ai competitor.
-Restituisci solo la struttura e una breve conclusione.
-"""
-
-            # Chiamata specifica a OpenAI con gestione errori dedicata
+            system_prompt = "Sei un Head of SEO. Crei brief editoriali che posizionano E convertono."
+            
+            user_prompt = f"""
+            ### OBIETTIVO
+            Creare la struttura perfetta per un articolo sulla keyword: "{keyword}".
+            Intento: {target_intent}.
+            Tono: {tone_of_voice}.
+            
+            ### IL NOSTRO CLIENTE (Chi siamo)
+            Analizza queste info per capire i nostri punti di forza e integrarli nella scaletta:
+            {client_context_str}
+            
+            ### I COMPETITOR (Chi dobbiamo battere)
+            {competitor_text[:10000]}
+            
+            ### DOMANDE UTENTI (PAA)
+            {", ".join(paa)}
+            
+            ### ISTRUZIONI OUTPUT
+            Genera un SEO Brief strutturato così:
+            
+            1. **Concept Strategico**: Come ci differenziamo dai competitor analizzati? (Sfrutta le info del cliente).
+            2. **Targeting**: A chi stiamo parlando?
+            3. **Struttura Outline (H1, H2, H3)**:
+               - H1 Ottimizzato.
+               - Per ogni H2, scrivi una "Direttiva per il Copywriter" spiegando cosa scrivere e QUALE USP del cliente citare in quel punto.
+               - Inserisci CTA (Call to Action) strategiche basate sui servizi del cliente.
+            
+            Usa Markdown.
+            """
+            
             try:
                 client = OpenAI(api_key=openai_api_key)
-                response = client.chat.completions.create(
+                resp = client.chat.completions.create(
                     model="gpt-4o",
-                    messages=[
-                        {"role": "system", "content": prompt_sistema},
-                        {"role": "user", "content": prompt_utente}
-                    ],
-                    timeout=45 # Timeout esplicito aumentato
+                    messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
                 )
+                output = resp.choices[0].message.content
                 
-                risultato_ai = response.choices[0].message.content
+                status.update(label="Strategia Pronta!", state="complete", expanded=False)
                 
-                status_box.update(label="Analisi Completata!", state="complete", expanded=False)
+                st.markdown(output)
                 
-                st.markdown("### 📝 Scaletta Generata")
-                st.markdown("---")
-                st.markdown(risultato_ai)
+                # Download
+                docx = create_docx(output, keyword)
+                st.download_button("📥 Scarica Brief .docx", docx, f"brief_{keyword.replace(' ','_')}.docx")
 
-            except Exception as e_ai:
-                status_box.update(label="Errore AI", state="error")
-                st.error(f"❌ Errore durante la comunicazione con OpenAI: {e_ai}")
-                st.info("Suggerimento: Controlla che la API Key sia corretta e di avere credito sufficiente.")
-
-        except Exception as e_gen:
-            status_box.update(label="Errore Generale", state="error")
-            st.error(f"Errore imprevisto: {e_gen}")
+            except Exception as e:
+                st.error(f"Erro
