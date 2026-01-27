@@ -97,4 +97,19 @@ if st.button("🚀 Scrivi Articolo Completo"):
                 # Creazione DOCX
                 doc = Document()
                 doc.add_heading('Articolo SEO Ottimizzato', 0)
-                # Nota: Inseriamo il testo grezzo. Per formattazione perfetta in Word servirebbe un
+                # Nota: Inseriamo il testo grezzo. Per formattazione perfetta in Word servirebbe un parser Markdown->Word complesso,
+                # ma questo mantiene il contenuto leggibile.
+                doc.add_paragraph(articolo_finale) 
+                
+                bio = BytesIO()
+                doc.save(bio)
+                
+                st.download_button(
+                    label="📥 Scarica Articolo (.docx)",
+                    data=bio,
+                    file_name="articolo_seo_pro.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
+                
+            except Exception as e:
+                st.error(f"Si è verificato un errore: {e}")
