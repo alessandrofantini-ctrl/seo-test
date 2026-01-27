@@ -176,6 +176,13 @@ if st.button("Avvia Analisi Completa"):
                 status.update(label="Strategia Pronta!", state="complete", expanded=False)
                 
                 st.markdown(output)
+
+
+# --- MODIFICA PER PASSARE I DATI ALLA PAGINA 2 ---
+# Salviamo il brief nella memoria di sessione di Streamlit
+st.session_state['ultimo_brief'] = output
+st.success("✅ Brief salvato in memoria! Vai alla pagina 'Redattore Articoli' per generare il testo.")
+
                 
                 # Download
                 docx = create_docx(output, keyword)
