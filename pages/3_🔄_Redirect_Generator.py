@@ -8,14 +8,14 @@ from io import BytesIO
 import re
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="Multi-File Redirect Mapper", layout="wide")
+st.set_page_config(page_title="Auto-Home Redirect Mapper", layout="wide")
 
-st.title("🌐 Multi-File AI Redirect Mapper")
+st.title("🌐 Auto-Home AI Redirect Mapper")
 st.markdown("""
-Strumento Enterprise per migrazioni complesse.
-1. **Priority Match**: Lingua Corretta > Fallback Inglese > **Default Catch-All**.
-2. **AI Semantic**: Analisi profonda del contenuto.
-3. **Full Report**: L'Excel include anche le URL non mappate per revisione manuale.
+Strumento avanzato per migrazioni internazionali.
+1. **AI Semantic 🧠**: Cerca la pagina specifica equivalente.
+2. **Fallback Inglese 🇬🇧**: Se non esiste in lingua locale, cerca la versione inglese.
+3. **Smart Home Catch-All 🏠**: Se nessun match, reindirizza automaticamente alla **Homepage della lingua corretta** (es. /it/ -> /it/home).
 """)
 
 # --- SIDEBAR ---
@@ -27,13 +27,12 @@ with st.sidebar:
     
     st.markdown("---")
     st.subheader("Soglie di Confidenza")
-    threshold_primary = st.slider("Match Stessa Lingua", 0.0, 1.0, 0.80)
+    threshold_primary = st.slider("Match Esatto (Contenuto)", 0.0, 1.0, 0.80)
     threshold_fallback = st.slider("Fallback Inglese", 0.0, 1.0, 0.75)
     
     st.markdown("---")
-    st.subheader("🚨 Rete di Sicurezza (Catch-All)")
-    use_default = st.checkbox("Usa Redirect Default se nessun match", value=False)
-    default_url = st.text_input("URL Default (es. Homepage)", placeholder="https://www.nuovosito.com", disabled=not use_default, help="Se l'AI fallisce, reindirizza qui invece di fare 404.")
+    st.subheader("🚨 Rete di Sicurezza")
+    use_auto_home = st.checkbox("Usa Home Lingua come fallback", value=True, help="Se l'AI non trova nulla, manda l'utente alla Homepage della sua lingua.")
 
 # --- FUNZIONI ---
 
@@ -121,6 +120,7 @@ def to_excel(df):
     return output.getvalue()
 
 def detect_language_code(url):
+    """Rileva lingua da URL."""
     parsed = urlparse(url)
     domain = parsed.netloc
     path = parsed.path.lower()
@@ -140,7 +140,9 @@ def detect_language_code(url):
         if first in ['fr', 'fr-fr']: return "fr"
         if first in ['de', 'de-de']: return "de"
     
-    return "unknown"
+    # Se non specificato, assumiamo sia il dominio principale (spesso EN o lingua base)
+    # Restituiamo 'base' per gestirlo genericamente
+    return "base"
 
 def make_context_string(row, lang_code):
     tag = f"LANGUAGE_{lang_code.upper()}"
@@ -165,19 +167,35 @@ if old_files and new_files:
     
     if df_old is not None and df_new is not None:
         
-        st.info(f"📚 **Totale**: {len(df_old)} URL Sorgente vs {len(df_new)} URL Destinazione.")
+        st.info(f"📚 **Analisi**: {len(df_old)} URL Sorgente vs {len(df_new)} URL Destinazione.")
 
-        if st.button("🚀 Avvia Matching Completo"):
+        if st.button("🚀 Avvia Matching Intelligente"):
             
             if not openai_api_key:
                 st.error("Inserisci API Key.")
             else:
-                status = st.status("Analisi Globale in corso...", expanded=True)
+                status = st.status("Analisi Struttura e Lingue...", expanded=True)
                 
-                # 1. PREPARAZIONE
+                # 1. RILEVAMENTO LINGUE
                 df_old['lang'] = df_old['url'].apply(detect_language_code)
                 df_new['lang'] = df_new['url'].apply(detect_language_code)
                 
+                # --- IDENTIFICAZIONE HOMEPAGE PER OGNI LINGUA ---
+                # Logica: La URL più corta per ogni codice lingua è probabilmente la Home.
+                language_homes = {}
+                unique_langs = df_new['lang'].unique()
+                
+                for lang in unique_langs:
+                    # Filtra URL di quella lingua
+                    lang_urls = df_new[df_new['lang'] == lang]['url'].tolist()
+                    if lang_urls:
+                        # Trova la più corta
+                        shortest = min(lang_urls, key=len)
+                        language_homes[lang] = shortest
+                
+                status.write(f"🏠 Homepage Rilevate: {language_homes}")
+                
+                # 2. CONTEXT & EMBEDDING
                 status.write("🧠 Generazione Embeddings...")
                 client = OpenAI(api_key=openai_api_key)
                 
@@ -200,8 +218,8 @@ if old_files and new_files:
                     emb_new.extend(get_embedding_batch(b, client))
                     prog.progress(0.8)
 
-                # 2. MATCHING LOGIC
-                status.write("🔍 Ricerca Corrispondenze...")
+                # 3. MATCHING LOGIC
+                status.write("🔍 Ricerca Corrispondenze & Catch-All...")
                 results = []
                 
                 if emb_old and emb_new:
@@ -215,12 +233,14 @@ if old_files and new_files:
                         row_old = df_old.loc[vector_idx]
                         old_lang = row_old['lang']
                         
-                        same_lang_indices = df_new.index[df_new['lang'] == old_lang].tolist()
                         best_match_url = ""
                         best_score = 0.0
                         method = "Nessuno (404)"
                         
-                        # A: Match Stessa Lingua
+                        # --- A: MATCH CONTENUTO (AI) ---
+                        # Filtra solo target stessa lingua
+                        same_lang_indices = df_new.index[df_new['lang'] == old_lang].tolist()
+                        
                         if same_lang_indices:
                             scores_same = sims[i, same_lang_indices]
                             if len(scores_same) > 0:
@@ -229,9 +249,9 @@ if old_files and new_files:
                                 if local_score >= threshold_primary:
                                     best_match_url = df_new.loc[same_lang_indices[local_idx], 'url']
                                     best_score = local_score
-                                    method = f"Same Lang ({old_lang})"
+                                    method = f"AI Match ({old_lang})"
 
-                        # B: Fallback EN
+                        # --- B: FALLBACK CONTENUTO EN (AI) ---
                         if not best_match_url and eng_indices and old_lang != 'en':
                             scores_eng = sims[i, eng_indices]
                             if len(scores_eng) > 0:
@@ -240,14 +260,24 @@ if old_files and new_files:
                                 if local_score >= threshold_fallback:
                                     best_match_url = df_new.loc[eng_indices[local_idx], 'url']
                                     best_score = local_score
-                                    method = "Fallback EN"
+                                    method = "AI Fallback EN"
                         
-                        # C: CATCH-ALL DEFAULT (Nuova Funzione)
-                        if not best_match_url and use_default and default_url:
-                            best_match_url = default_url
-                            method = "Default Catch-All"
-                            best_score = 0.0 # Score 0 perché è forzato
-                        
+                        # --- C: AUTO-HOME CATCH-ALL (SAFETY NET) ---
+                        if not best_match_url and use_auto_home:
+                            # Cerca la home della lingua di origine
+                            if old_lang in language_homes:
+                                best_match_url = language_homes[old_lang]
+                                method = f"Auto-Home ({old_lang})"
+                                best_score = 0.1 # Basso score convenzionale
+                            
+                            # Se non trova la lingua (es. lingua vecchia rimossa), prova la Home Base/Inglese
+                            elif 'base' in language_homes:
+                                best_match_url = language_homes['base']
+                                method = "Auto-Home (Base)"
+                            elif 'en' in language_homes:
+                                best_match_url = language_homes['en']
+                                method = "Auto-Home (EN)"
+
                         results.append({
                             "Old URL": row_old['url'],
                             "New URL": best_match_url,
@@ -264,29 +294,22 @@ if old_files and new_files:
                 
                 # Metrics
                 total = len(final_df)
-                matched = len(final_df[(final_df['New URL'] != "") & (final_df['Method'] != "Default Catch-All")])
-                defaults = len(final_df[final_df['Method'] == "Default Catch-All"])
-                unmapped = len(final_df[final_df['New URL'] == ""])
+                matched = len(final_df[final_df['Method'].str.contains("AI Match") | final_df['Method'].str.contains("Fallback")])
+                homes = len(final_df[final_df['Method'].str.contains("Auto-Home")])
                 
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Totale", total)
-                c2.metric("Match AI", matched)
-                c3.metric("Catch-All", defaults)
-                c4.metric("Non Mappati (404)", unmapped, delta_color="inverse")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Totale URL", total)
+                c2.metric("Redirect Specifici (AI)", matched)
+                c3.metric("Redirect Generici (Home)", homes)
                 
                 st.dataframe(final_df.head(50))
                 
-                # EXPORT COMPLETO (Senza filtri, così vedi i buchi)
-                # Se vuoi solo Old/New:
-                export_cols = final_df[['Old URL', 'New URL', 'Method', 'Confidence']]
-                excel_data = to_excel(export_cols)
+                export_df = final_df[final_df['New URL'] != ""][['Old URL', 'New URL']]
+                excel_data = to_excel(export_df)
                 
                 st.download_button(
-                    label="📥 Scarica Excel Completo (Inclusi vuoti)",
+                    label="📥 Scarica Excel Unificato",
                     data=excel_data,
-                    file_name="redirect_map_full.xlsx",
+                    file_name="redirect_map_final.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-                
-                if unmapped > 0:
-                    st.warning(f"⚠️ Attenzione: {unmapped} URL non hanno trovato corrispondenza e non hanno default. Risulteranno 404.")
