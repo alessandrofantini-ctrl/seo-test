@@ -6,3 +6,4 @@ python-docx
 pandas
 scikit-learn
 numpy
+openpyxl
