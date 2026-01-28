@@ -8,14 +8,14 @@ from io import BytesIO
 import re
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="Auto-Home Redirect Mapper", layout="wide")
+st.set_page_config(page_title="Smart Language Redirect Mapper", layout="wide")
 
-st.title("🌐 Auto-Home AI Redirect Mapper")
+st.title("🌐 Smart Language AI Redirect Mapper")
 st.markdown("""
 Strumento avanzato per migrazioni internazionali.
-1. **AI Semantic 🧠**: Cerca la pagina specifica equivalente.
-2. **Fallback Inglese 🇬🇧**: Se non esiste in lingua locale, cerca la versione inglese.
-3. **Smart Home Catch-All 🏠**: Se nessun match, reindirizza automaticamente alla **Homepage della lingua corretta** (es. /it/ -> /it/home).
+1. **Riconoscimento Vocabolario 🇮🇹**: Capisce che "aggiornamento" o "chi-siamo" sono pagine Italiane.
+2. **Default Intelligente**: Imposta una lingua di base per le URL nella root (es. bossong.com -> IT).
+3. **Smart Home Catch-All 🏠**: Reindirizza alla Home corretta se l'AI fallisce.
 """)
 
 # --- SIDEBAR ---
@@ -26,13 +26,23 @@ with st.sidebar:
         openai_api_key = st.secrets["OPENAI_API_KEY"]
     
     st.markdown("---")
+    st.subheader("🌍 Gestione Lingue")
+    # NUOVO: Opzione per forzare la lingua di default
+    default_lang_fallback = st.selectbox(
+        "Lingua Default (se non rilevata dall'URL)",
+        ["it", "en", "base"],
+        index=0,
+        help="Se l'URL è 'sito.com/pagina', che lingua è? Per siti italiani con dominio .com, scegli 'it'."
+    )
+    
+    st.markdown("---")
     st.subheader("Soglie di Confidenza")
     threshold_primary = st.slider("Match Esatto (Contenuto)", 0.0, 1.0, 0.80)
     threshold_fallback = st.slider("Fallback Inglese", 0.0, 1.0, 0.75)
     
     st.markdown("---")
     st.subheader("🚨 Rete di Sicurezza")
-    use_auto_home = st.checkbox("Usa Home Lingua come fallback", value=True, help="Se l'AI non trova nulla, manda l'utente alla Homepage della sua lingua.")
+    use_auto_home = st.checkbox("Usa Home Lingua come fallback", value=True)
 
 # --- FUNZIONI ---
 
@@ -119,12 +129,16 @@ def to_excel(df):
         df.to_excel(writer, index=False, sheet_name='Redirects')
     return output.getvalue()
 
-def detect_language_code(url):
-    """Rileva lingua da URL."""
+def detect_language_code(url, default_fallback='base'):
+    """
+    Rileva lingua da URL usando struttura E vocabolario.
+    """
     parsed = urlparse(url)
     domain = parsed.netloc
     path = parsed.path.lower()
+    slug = path # Usiamo tutto il path per cercare parole chiave
     
+    # 1. STRUTTURA ESPLICITA
     if domain.endswith(".it"): return "it"
     if domain.endswith(".es"): return "es"
     if domain.endswith(".fr"): return "fr"
@@ -139,10 +153,20 @@ def detect_language_code(url):
         if first in ['es', 'es-es']: return "es"
         if first in ['fr', 'fr-fr']: return "fr"
         if first in ['de', 'de-de']: return "de"
+
+    # 2. EURISTICA VOCABOLARIO (Per URL tipo bossong.com/aggiornamento)
+    # Parole chiave forti che identificano la lingua
+    it_keywords = ['aggiornamento', 'prodotti', 'azienda', 'chi-siamo', 'contatti', 'servizi', 'novita', 'referenze', 'tecnica', 'scheda']
+    en_keywords = ['about-us', 'company', 'products', 'news', 'contact', 'services', 'technical', 'sheet', 'references']
     
-    # Se non specificato, assumiamo sia il dominio principale (spesso EN o lingua base)
-    # Restituiamo 'base' per gestirlo genericamente
-    return "base"
+    for word in it_keywords:
+        if word in slug: return "it"
+        
+    for word in en_keywords:
+        if word in slug: return "en"
+    
+    # 3. FALLBACK UTENTE
+    return default_fallback
 
 def make_context_string(row, lang_code):
     tag = f"LANGUAGE_{lang_code.upper()}"
@@ -174,25 +198,34 @@ if old_files and new_files:
             if not openai_api_key:
                 st.error("Inserisci API Key.")
             else:
-                status = st.status("Analisi Struttura e Lingue...", expanded=True)
+                status = st.status("Analisi Vocabolario e Struttura...", expanded=True)
                 
-                # 1. RILEVAMENTO LINGUE
-                df_old['lang'] = df_old['url'].apply(detect_language_code)
-                df_new['lang'] = df_new['url'].apply(detect_language_code)
+                # 1. RILEVAMENTO LINGUE CON DEFAULT
+                # Passiamo il default scelto dall'utente nella sidebar
+                df_old['lang'] = df_old['url'].apply(lambda x: detect_language_code(x, default_fallback=default_lang_fallback))
+                
+                # Per il nuovo sito, di solito la struttura è più pulita, ma usiamo lo stesso default o 'base'
+                df_new['lang'] = df_new['url'].apply(lambda x: detect_language_code(x, default_fallback='base'))
+                
+                # Debug Lingue rilevate
+                langs_detected = df_old['lang'].unique()
+                status.write(f"🌍 Lingue rilevate nel Vecchio Sito: {list(langs_detected)}")
                 
                 # --- IDENTIFICAZIONE HOMEPAGE PER OGNI LINGUA ---
-                # Logica: La URL più corta per ogni codice lingua è probabilmente la Home.
                 language_homes = {}
                 unique_langs = df_new['lang'].unique()
                 
                 for lang in unique_langs:
-                    # Filtra URL di quella lingua
                     lang_urls = df_new[df_new['lang'] == lang]['url'].tolist()
                     if lang_urls:
-                        # Trova la più corta
+                        # La più corta è la home
                         shortest = min(lang_urls, key=len)
                         language_homes[lang] = shortest
                 
+                # Se c'è una home 'base' nel nuovo sito e nessuna specifica per il default vecchio
+                if 'base' in language_homes and default_lang_fallback not in language_homes:
+                     language_homes[default_lang_fallback] = language_homes['base']
+
                 status.write(f"🏠 Homepage Rilevate: {language_homes}")
                 
                 # 2. CONTEXT & EMBEDDING
@@ -237,8 +270,7 @@ if old_files and new_files:
                         best_score = 0.0
                         method = "Nessuno (404)"
                         
-                        # --- A: MATCH CONTENUTO (AI) ---
-                        # Filtra solo target stessa lingua
+                        # --- A: MATCH CONTENUTO (STESSA LINGUA) ---
                         same_lang_indices = df_new.index[df_new['lang'] == old_lang].tolist()
                         
                         if same_lang_indices:
@@ -262,21 +294,21 @@ if old_files and new_files:
                                     best_score = local_score
                                     method = "AI Fallback EN"
                         
-                        # --- C: AUTO-HOME CATCH-ALL (SAFETY NET) ---
+                        # --- C: AUTO-HOME CATCH-ALL ---
                         if not best_match_url and use_auto_home:
-                            # Cerca la home della lingua di origine
+                            # 1. Prova Home stessa lingua
                             if old_lang in language_homes:
                                 best_match_url = language_homes[old_lang]
                                 method = f"Auto-Home ({old_lang})"
-                                best_score = 0.1 # Basso score convenzionale
-                            
-                            # Se non trova la lingua (es. lingua vecchia rimossa), prova la Home Base/Inglese
-                            elif 'base' in language_homes:
-                                best_match_url = language_homes['base']
-                                method = "Auto-Home (Base)"
+                                best_score = 0.1 
+                            # 2. Prova Home Inglese
                             elif 'en' in language_homes:
                                 best_match_url = language_homes['en']
                                 method = "Auto-Home (EN)"
+                            # 3. Prova Home Base
+                            elif 'base' in language_homes:
+                                best_match_url = language_homes['base']
+                                method = "Auto-Home (Base)"
 
                         results.append({
                             "Old URL": row_old['url'],
@@ -310,6 +342,6 @@ if old_files and new_files:
                 st.download_button(
                     label="📥 Scarica Excel Unificato",
                     data=excel_data,
-                    file_name="redirect_map_final.xlsx",
+                    file_name="redirect_map_smart_lang.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
