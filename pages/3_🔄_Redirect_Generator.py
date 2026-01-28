@@ -8,14 +8,14 @@ from io import BytesIO
 import re
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="Multilingual AI Redirect Mapper", layout="wide")
+st.set_page_config(page_title="Multi-File Redirect Mapper", layout="wide")
 
-st.title("🌐 Multilingual AI Redirect Mapper")
+st.title("🌐 Multi-File AI Redirect Mapper")
 st.markdown("""
-Strumento ottimizzato per **migrazioni internazionali**.
-1. **Language Aware 🇮🇹🇪🇸**: Rileva TLD (.it, .es) e sottocartelle lingua (/it/, /en/) per forzare la coerenza linguistica.
-2. **Deep Semantic 🧠**: Usa l'AI per mappare i contenuti, ma rispetta la lingua di origine.
-3. **Clean Export 📤**: Scarica un Excel pulito pronto per gli sviluppatori.
+Strumento Enterprise per migrazioni complesse.
+1. **Priority Match**: Lingua Corretta > Fallback Inglese > **Default Catch-All**.
+2. **AI Semantic**: Analisi profonda del contenuto.
+3. **Full Report**: L'Excel include anche le URL non mappate per revisione manuale.
 """)
 
 # --- SIDEBAR ---
@@ -25,31 +25,37 @@ with st.sidebar:
     if not openai_api_key and "OPENAI_API_KEY" in st.secrets:
         openai_api_key = st.secrets["OPENAI_API_KEY"]
     
-    threshold = st.slider("Soglia Confidenza AI", 0.0, 1.0, 0.82, help="Consigliato > 0.80 per siti multilingua per evitare falsi positivi.")
+    st.markdown("---")
+    st.subheader("Soglie di Confidenza")
+    threshold_primary = st.slider("Match Stessa Lingua", 0.0, 1.0, 0.80)
+    threshold_fallback = st.slider("Fallback Inglese", 0.0, 1.0, 0.75)
+    
+    st.markdown("---")
+    st.subheader("🚨 Rete di Sicurezza (Catch-All)")
+    use_default = st.checkbox("Usa Redirect Default se nessun match", value=False)
+    default_url = st.text_input("URL Default (es. Homepage)", placeholder="https://www.nuovosito.com", disabled=not use_default, help="Se l'AI fallisce, reindirizza qui invece di fare 404.")
 
 # --- FUNZIONI ---
 
-def load_sf_data(uploaded_file):
-    """Carica dati, filtra SOLO HTML e gestisce Custom Extraction."""
-    df = None
-    filename = uploaded_file.name
-    
+def load_single_file(uploaded_file):
     try:
+        filename = uploaded_file.name
         if filename.endswith('.xlsx') or filename.endswith('.xls'):
-            df = pd.read_excel(uploaded_file, engine='openpyxl')
+            return pd.read_excel(uploaded_file, engine='openpyxl')
         else:
             encodings = ['utf-8', 'ISO-8859-1', 'cp1252']
             for enc in encodings:
                 try:
                     uploaded_file.seek(0)
-                    df = pd.read_csv(uploaded_file, encoding=enc, low_memory=False)
-                    break
+                    return pd.read_csv(uploaded_file, encoding=enc, low_memory=False)
                 except: continue
+            return None
     except Exception as e:
-        st.error(f"Errore file: {e}"); return None
+        st.error(f"Errore lettura {uploaded_file.name}: {e}")
+        return None
 
+def process_dataframe(df, filename):
     if df is None: return None
-
     try:
         df.columns = df.columns.str.strip()
         cols_lower = df.columns.str.lower()
@@ -57,24 +63,19 @@ def load_sf_data(uploaded_file):
         
         # Filtro HTML
         col_type_idx = next((i for i, c in enumerate(cols_lower) if "content" in c and "type" in c), None)
-        total_rows = len(df)
-        
         if col_type_idx is not None:
             col_name = orig_cols[col_type_idx]
             df = df[df[col_name].astype(str).str.contains("html", case=False, na=False)]
         
-        html_rows = len(df)
-        if total_rows > html_rows:
-            st.toast(f"🧹 Rimasti: {html_rows} URL HTML (filtrati {total_rows - html_rows}).", icon="🗑️")
-
-        # Mappatura Colonne
+        # Mappatura
         col_url = next((c for c in cols_lower if "address" in c or "indirizzo" in c), None)
         col_title = next((c for c in cols_lower if ("title 1" in c or "titolo 1" in c) and "len" not in c), None)
         col_h1 = next((c for c in cols_lower if "h1-1" in c and "len" not in c), None)
         col_content = next((c for c in cols_lower if ("content" in c or "body" in c or "text" in c or "testo" in c) and "type" not in c), None)
         
         if not col_url:
-            st.error(f"Colonna 'Address' mancante in {filename}"); return None
+            st.warning(f"File '{filename}' saltato: Address mancante.")
+            return None
             
         clean_df = pd.DataFrame()
         clean_df['url'] = df[orig_cols[cols_lower.get_loc(col_url)]].astype(str)
@@ -85,12 +86,25 @@ def load_sf_data(uploaded_file):
 
         clean_df['title'] = safe_get(col_title)
         clean_df['h1'] = safe_get(col_h1)
-        clean_df['body_text'] = safe_get(col_content) 
+        clean_df['body_text'] = safe_get(col_content)
         
         return clean_df
 
     except Exception as e:
-        st.error(f"Errore struttura file: {e}"); return None
+        st.error(f"Errore processamento {filename}: {e}")
+        return None
+
+def load_multiple_files(uploaded_files):
+    all_dfs = []
+    for file in uploaded_files:
+        raw_df = load_single_file(file)
+        processed_df = process_dataframe(raw_df, file.name)
+        if processed_df is not None:
+            all_dfs.append(processed_df)
+    
+    if all_dfs:
+        return pd.concat(all_dfs, ignore_index=True)
+    return None
 
 def get_embedding_batch(text_list, client):
     try:
@@ -106,151 +120,173 @@ def to_excel(df):
         df.to_excel(writer, index=False, sheet_name='Redirects')
     return output.getvalue()
 
-def extract_language_signal(url):
-    """
-    Estrae segnali forti di lingua dall'URL per aiutare l'AI.
-    Ritorna stringhe tipo: 'LANG_IT DOMAIN_IT'
-    """
-    signal = []
+def detect_language_code(url):
     parsed = urlparse(url)
     domain = parsed.netloc
-    path = parsed.path
+    path = parsed.path.lower()
     
-    # 1. Analisi TLD (Top Level Domain)
-    if domain.endswith(".it"): signal.append("DOMAIN_IT LANGUAGE_ITALIAN")
-    elif domain.endswith(".es"): signal.append("DOMAIN_ES LANGUAGE_SPANISH")
-    elif domain.endswith(".fr"): signal.append("DOMAIN_FR LANGUAGE_FRENCH")
-    elif domain.endswith(".de"): signal.append("DOMAIN_DE LANGUAGE_GERMAN")
-    elif domain.endswith(".co.uk"): signal.append("DOMAIN_UK LANGUAGE_ENGLISH")
+    if domain.endswith(".it"): return "it"
+    if domain.endswith(".es"): return "es"
+    if domain.endswith(".fr"): return "fr"
+    if domain.endswith(".de"): return "de"
+    if domain.endswith(".co.uk") or domain.endswith(".uk"): return "en"
     
-    # 2. Analisi Path (Sottocartelle)
-    # Cerca pattern come /it/, /en-us/, /es/
-    path_segments = path.split('/')
-    if len(path_segments) > 1:
-        first_seg = path_segments[1].lower()
-        if len(first_seg) == 2 or (len(first_seg) == 5 and '-' in first_seg):
-            if first_seg in ['it', 'it-it']: signal.append("PATH_IT LANGUAGE_ITALIAN")
-            elif first_seg in ['en', 'en-us', 'en-gb']: signal.append("PATH_EN LANGUAGE_ENGLISH")
-            elif first_seg in ['es', 'es-es']: signal.append("PATH_ES LANGUAGE_SPANISH")
-            elif first_seg in ['fr', 'fr-fr']: signal.append("PATH_FR LANGUAGE_FRENCH")
-            elif first_seg in ['de', 'de-de']: signal.append("PATH_DE LANGUAGE_GERMAN")
-            
-    return " ".join(signal)
+    segments = path.split('/')
+    if len(segments) > 1:
+        first = segments[1]
+        if first in ['it', 'it-it']: return "it"
+        if first in ['en', 'en-us', 'en-gb', 'uk']: return "en"
+        if first in ['es', 'es-es']: return "es"
+        if first in ['fr', 'fr-fr']: return "fr"
+        if first in ['de', 'de-de']: return "de"
+    
+    return "unknown"
+
+def make_context_string(row, lang_code):
+    tag = f"LANGUAGE_{lang_code.upper()}"
+    ctx = f"[{tag}] URL: {row['url']} | TITLE: {row['title']} | H1: {row['h1']}"
+    if row['body_text']:
+        ctx += f" | CONTENT: {row['body_text'][:800]}"
+    return ctx
 
 # --- INTERFACCIA ---
 
 col1, col2 = st.columns(2)
 with col1:
-    st.subheader("1. Vecchio Sito")
-    old_file = st.file_uploader("Vecchio (CSV/Excel)", type=["csv", "xlsx"], key="old")
+    st.subheader("1. Vecchi Siti")
+    old_files = st.file_uploader("Sorgente (CSV/Excel)", type=["csv", "xlsx"], accept_multiple_files=True, key="old")
 with col2:
-    st.subheader("2. Nuovo Sito")
-    new_file = st.file_uploader("Nuovo (CSV/Excel)", type=["csv", "xlsx"], key="new")
+    st.subheader("2. Nuovi Siti")
+    new_files = st.file_uploader("Destinazione (CSV/Excel)", type=["csv", "xlsx"], accept_multiple_files=True, key="new")
 
-if old_file and new_file:
-    df_old = load_sf_data(old_file)
-    df_new = load_sf_data(new_file)
+if old_files and new_files:
+    df_old = load_multiple_files(old_files)
+    df_new = load_multiple_files(new_files)
     
     if df_old is not None and df_new is not None:
         
-        st.info(f"📁 Analisi: {len(df_old)} URL Old vs {len(df_new)} URL New.")
+        st.info(f"📚 **Totale**: {len(df_old)} URL Sorgente vs {len(df_new)} URL Destinazione.")
 
-        if st.button("🚀 Avvia Language-Aware Matching"):
+        if st.button("🚀 Avvia Matching Completo"):
             
             if not openai_api_key:
                 st.error("Inserisci API Key.")
             else:
-                status = st.status("Analisi Lingua e Contenuti...", expanded=True)
-                results = []
+                status = st.status("Analisi Globale in corso...", expanded=True)
                 
+                # 1. PREPARAZIONE
+                df_old['lang'] = df_old['url'].apply(detect_language_code)
+                df_new['lang'] = df_new['url'].apply(detect_language_code)
+                
+                status.write("🧠 Generazione Embeddings...")
                 client = OpenAI(api_key=openai_api_key)
-
-                # --- CONTEXT CREATION CON LANGUAGE BOOSTING ---
-                def make_enhanced_context(df):
-                    contexts = []
-                    for _, row in df.iterrows():
-                        # Estraiamo il segnale lingua
-                        lang_sig = extract_language_signal(row['url'])
-                        
-                        # Creiamo la stringa per l'embedding mettendo la LINGUA all'inizio
-                        # Esempio: "[DOMAIN_IT LANGUAGE_ITALIAN] URL: ... TITLE: ..."
-                        ctx = f"[{lang_sig}] URL: {row['url']} | TITLE: {row['title']} | H1: {row['h1']}"
-                        
-                        # Aggiungiamo body text se c'è, ma troncato
-                        if row['body_text']:
-                            ctx += f" | CONTENT: {row['body_text'][:800]}"
-                        
-                        contexts.append(ctx)
-                    return contexts
-
-                status.write("🧠 Estrazione segnali linguistici (TLD, Path)...")
-                df_old['ctx'] = make_enhanced_context(df_old)
-                df_new['ctx'] = make_enhanced_context(df_new)
                 
-                # --- EMBEDDINGS ---
-                status.write("📐 Vettorializzazione...")
+                df_old['ctx'] = df_old.apply(lambda r: make_context_string(r, r['lang']), axis=1)
+                df_new['ctx'] = df_new.apply(lambda r: make_context_string(r, r['lang']), axis=1)
+                
+                # Embedding Old
                 emb_old = []
                 batch_s = 100
                 prog = status.progress(0)
-                
-                # Old
                 for i in range(0, len(df_old), batch_s):
                     b = df_old['ctx'].iloc[i:i+batch_s].tolist()
                     emb_old.extend(get_embedding_batch(b, client))
                     prog.progress(0.4)
                 
-                # New
+                # Embedding New
                 emb_new = []
                 for i in range(0, len(df_new), batch_s):
                     b = df_new['ctx'].iloc[i:i+batch_s].tolist()
                     emb_new.extend(get_embedding_batch(b, client))
                     prog.progress(0.8)
 
-                # --- MATCHING ---
-                status.write("🔍 Ricerca corrispondenze semantiche...")
+                # 2. MATCHING LOGIC
+                status.write("🔍 Ricerca Corrispondenze...")
+                results = []
                 
                 if emb_old and emb_new:
                     mat_old = np.array(emb_old)
                     mat_new = np.array(emb_new)
                     sims = cosine_similarity(mat_old, mat_new)
                     
+                    eng_indices = df_new.index[df_new['lang'] == 'en'].tolist()
+                    
                     for i, vector_idx in enumerate(df_old.index):
                         row_old = df_old.loc[vector_idx]
-                        scores = sims[i]
-                        best_idx = scores.argmax()
-                        score = scores[best_idx]
+                        old_lang = row_old['lang']
                         
-                        sug_url = ""
-                        # Logica Threshold
-                        if score >= threshold:
-                            new_row = df_new.iloc[best_idx]
-                            sug_url = new_row['url']
+                        same_lang_indices = df_new.index[df_new['lang'] == old_lang].tolist()
+                        best_match_url = ""
+                        best_score = 0.0
+                        method = "Nessuno (404)"
+                        
+                        # A: Match Stessa Lingua
+                        if same_lang_indices:
+                            scores_same = sims[i, same_lang_indices]
+                            if len(scores_same) > 0:
+                                local_idx = scores_same.argmax()
+                                local_score = scores_same[local_idx]
+                                if local_score >= threshold_primary:
+                                    best_match_url = df_new.loc[same_lang_indices[local_idx], 'url']
+                                    best_score = local_score
+                                    method = f"Same Lang ({old_lang})"
+
+                        # B: Fallback EN
+                        if not best_match_url and eng_indices and old_lang != 'en':
+                            scores_eng = sims[i, eng_indices]
+                            if len(scores_eng) > 0:
+                                local_idx = scores_eng.argmax()
+                                local_score = scores_eng[local_idx]
+                                if local_score >= threshold_fallback:
+                                    best_match_url = df_new.loc[eng_indices[local_idx], 'url']
+                                    best_score = local_score
+                                    method = "Fallback EN"
+                        
+                        # C: CATCH-ALL DEFAULT (Nuova Funzione)
+                        if not best_match_url and use_default and default_url:
+                            best_match_url = default_url
+                            method = "Default Catch-All"
+                            best_score = 0.0 # Score 0 perché è forzato
                         
                         results.append({
                             "Old URL": row_old['url'],
-                            "New URL": sug_url,
-                            "Confidence": round(score * 100, 1),
-                            "Debug Context": row_old['ctx'][:50] # Utile per vedere se ha preso la lingua
+                            "New URL": best_match_url,
+                            "Confidence": round(best_score * 100, 1),
+                            "Method": method,
+                            "Detected Lang": old_lang
                         })
 
                 # --- EXPORT ---
                 final_df = pd.DataFrame(results)
                 status.update(label="Fatto!", state="complete", expanded=False)
                 
-                st.subheader("🎯 Risultati (Language Aware)")
+                st.subheader("🎯 Report Finale")
                 
-                # Preview
-                st.dataframe(final_df.head(10))
+                # Metrics
+                total = len(final_df)
+                matched = len(final_df[(final_df['New URL'] != "") & (final_df['Method'] != "Default Catch-All")])
+                defaults = len(final_df[final_df['Method'] == "Default Catch-All"])
+                unmapped = len(final_df[final_df['New URL'] == ""])
                 
-                # Export Clean
-                export_df = final_df[final_df['New URL'] != ""][['Old URL', 'New URL']]
-                excel_data = to_excel(export_df)
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Totale", total)
+                c2.metric("Match AI", matched)
+                c3.metric("Catch-All", defaults)
+                c4.metric("Non Mappati (404)", unmapped, delta_color="inverse")
+                
+                st.dataframe(final_df.head(50))
+                
+                # EXPORT COMPLETO (Senza filtri, così vedi i buchi)
+                # Se vuoi solo Old/New:
+                export_cols = final_df[['Old URL', 'New URL', 'Method', 'Confidence']]
+                excel_data = to_excel(export_cols)
                 
                 st.download_button(
-                    label="📥 Scarica Excel Finale (Solo Old & New)",
+                    label="📥 Scarica Excel Completo (Inclusi vuoti)",
                     data=excel_data,
-                    file_name="redirect_map_multilang.xlsx",
+                    file_name="redirect_map_full.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
                 
-                st.info(f"Redirect generati: {len(export_df)}. Il sistema ha penalizzato automaticamente i match tra lingue diverse.")
+                if unmapped > 0:
+                    st.warning(f"⚠️ Attenzione: {unmapped} URL non hanno trovato corrispondenza e non hanno default. Risulteranno 404.")
