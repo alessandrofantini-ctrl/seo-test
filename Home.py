@@ -8,7 +8,6 @@ st.set_page_config(
 )
 
 # --- HEADER CON LOGO E TITOLO ---
-# Qui inseriamo il logo SVG ufficiale di Lumi Company
 st.image("https://www.lumicompany.it/_next/static/media/lumi_logo_black.b03993c0.svg", width=300)
 
 st.title("✨ Lumi Company AI Suite")
@@ -26,11 +25,14 @@ _Il primo passo._ Analizza le keyword, studia i competitor e crea il **Brief Edi
 #### 2️⃣ ✍️ **[Redattore Articoli AI](/Redattore_Articoli)**
 _Il secondo passo._ Trasforma il Brief generato in un **articolo completo**, formattato e ottimizzato per il blog di Lumi Company.
 
+#### 3️⃣ 🔄 **[Redirect Assistant Pro](/Redirect_Generator)**
+_Per le migrazioni._ Carica i CSV di Screaming Frog e usa l'AI per mappare automaticamente le vecchie URL sulle nuove, evitando errori 404.
+
 ---
 """)
 
 # --- FOOTER ---
-st.info("💡 **Tip:** Per ottenere i migliori risultati, inizia sempre dall'Analisi SEO e poi passa il brief al Redattore.")
+st.info("💡 **Workflow Consigliato:** Analisi SEO -> Redazione Articolo. Usa il Redirect Assistant solo in fase di restyling o migrazione.")
 
 st.markdown(
     """
