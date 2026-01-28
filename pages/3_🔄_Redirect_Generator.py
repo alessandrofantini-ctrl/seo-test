@@ -3,16 +3,18 @@ import pandas as pd
 from openai import OpenAI
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
+from urllib.parse import urlparse
 import time
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="AI Redirect Mapper", layout="wide")
+st.set_page_config(page_title="Hybrid Redirect Mapper", layout="wide")
 
-st.title("🔄 Screaming Frog AI Redirect Mapper")
+st.title("⚡ Hybrid SEO Redirect Mapper")
 st.markdown("""
-Questo strumento utilizza l'Intelligenza Artificiale (Embedding) per mappare i redirect.
-Carica i file **CSV o Excel** esportati da **Screaming Frog** (Vecchio Sito e Nuovo Sito).
-L'AI leggerà URL, Title e H1 per trovare la corrispondenza semantica perfetta.
+Questo strumento usa un approccio ibrido per la massima precisione:
+1. **Filtro HTML 🧹**: Scarta automaticamente immagini, CSS, JS e PDF.
+2. **Smart Slug Match ⚡**: Accoppia istantaneamente URL identiche o con lo stesso percorso.
+3. **AI Deep Semantic 🧠**: Usa l'AI e il contenuto della pagina per mappare le URL orfane.
 """)
 
 # --- SIDEBAR ---
@@ -22,213 +24,252 @@ with st.sidebar:
     if not openai_api_key and "OPENAI_API_KEY" in st.secrets:
         openai_api_key = st.secrets["OPENAI_API_KEY"]
     
-    threshold = st.slider("Soglia di Confidenza Minima", 0.0, 1.0, 0.75, help="Sotto questo valore, il redirect non verrà suggerito.")
+    threshold = st.slider("Soglia Confidenza AI", 0.0, 1.0, 0.80)
 
 # --- FUNZIONI ---
 
 def load_sf_data(uploaded_file):
-    """Carica dati da CSV o Excel (Screaming Frog) in modo universale."""
+    """Carica dati, filtra SOLO HTML e gestisce Custom Extraction."""
     df = None
     filename = uploaded_file.name
     
-    # 1. CARICAMENTO DATI
+    # 1. CARICAMENTO
     try:
         if filename.endswith('.xlsx') or filename.endswith('.xls'):
-            # Caricamento EXCEL
             df = pd.read_excel(uploaded_file, engine='openpyxl')
         else:
-            # Caricamento CSV (Tentativi multipli di encoding)
-            encodings_to_try = ['utf-8', 'ISO-8859-1', 'cp1252', 'utf-16']
-            for encoding in encodings_to_try:
+            encodings = ['utf-8', 'ISO-8859-1', 'cp1252']
+            for enc in encodings:
                 try:
                     uploaded_file.seek(0)
-                    df = pd.read_csv(uploaded_file, encoding=encoding, low_memory=False)
+                    df = pd.read_csv(uploaded_file, encoding=enc, low_memory=False)
                     break
-                except UnicodeDecodeError:
-                    continue
-                except Exception:
-                    break
+                except: continue
     except Exception as e:
-        st.error(f"Errore lettura file: {e}")
-        return None
+        st.error(f"Errore file: {e}"); return None
 
-    if df is None:
-        st.error("Impossibile leggere il file. Verifica che sia un CSV o Excel valido.")
-        return None
+    if df is None: return None
 
-    # 2. NORMALIZZAZIONE E PULIZIA
+    # 2. PULIZIA E FILTRO HTML
     try:
-        # Pulisce nomi colonne
         df.columns = df.columns.str.strip()
         cols_lower = df.columns.str.lower()
+        orig_cols = df.columns
         
-        # Cerca le colonne chiave di Screaming Frog (indipendentemente dalla lingua)
-        col_url_idx = next((i for i, c in enumerate(cols_lower) if "address" in c or "indirizzo" in c), None)
-        # Cerca Title e H1 (esclude colonne tipo 'Title 1 Length')
-        col_title_idx = next((i for i, c in enumerate(cols_lower) if ("title 1" in c or "titolo 1" in c) and "length" not in c), None)
-        col_h1_idx = next((i for i, c in enumerate(cols_lower) if "h1-1" in c and "length" not in c), None)
+        # --- FILTRO HTML ---
+        # Cerchiamo la colonna "Content Type"
+        col_type_idx = next((i for i, c in enumerate(cols_lower) if "content" in c and "type" in c), None)
         
-        if col_url_idx is None:
-            st.error(f"Colonna 'Address' non trovata nel file {filename}.")
-            return None
+        total_rows = len(df)
+        
+        if col_type_idx is not None:
+            # Filtriamo: teniamo solo le righe dove Content Type contiene "html"
+            col_name = orig_cols[col_type_idx]
+            df = df[df[col_name].astype(str).str.contains("html", case=False, na=False)]
+        
+        html_rows = len(df)
+        
+        # Se abbiamo filtrato qualcosa, lo notifichiamo (ma non blocchiamo)
+        if total_rows > html_rows:
+            st.toast(f"🧹 Filtrati {total_rows - html_rows} file non-HTML (immagini, js, pdf). Rimasti: {html_rows}.", icon="🗑️")
+
+        # --- MAPPATURA COLONNE ---
+        # Ricalcoliamo cols_lower perché il dataframe è stato filtrato ma le colonne sono le stesse
+        # (Non serve ricalcolare cols_lower, ma serve ritrovare i dati)
+
+        col_url = next((c for c in cols_lower if "address" in c or "indirizzo" in c), None)
+        
+        # Colonne Standard
+        col_title = next((c for c in cols_lower if ("title 1" in c or "titolo 1" in c) and "len" not in c), None)
+        col_h1 = next((c for c in cols_lower if "h1-1" in c and "len" not in c), None)
+        
+        # Colonne Avanzate
+        col_desc = next((c for c in cols_lower if "meta description 1" in c and "len" not in c), None)
+        col_h2 = next((c for c in cols_lower if "h2-1" in c and "len" not in c), None)
+        
+        # Custom Extraction (Body Text)
+        # Escludiamo "Content Type" dalla ricerca del body text per evitare conflitti
+        col_content = next((c for c in cols_lower if ("content" in c or "body" in c or "text" in c or "testo" in c) and "type" not in c), None)
+        
+        if not col_url:
+            st.error(f"Colonna 'Address' mancante in {filename}"); return None
             
-        # Crea DataFrame pulito
         clean_df = pd.DataFrame()
-        clean_df['url'] = df.iloc[:, col_url_idx]
-        clean_df['title'] = df.iloc[:, col_title_idx].fillna("") if col_title_idx is not None else ""
-        clean_df['h1'] = df.iloc[:, col_h1_idx].fillna("") if col_h1_idx is not None else ""
         
-        # Filtro status code 200 (se presente)
-        col_status_idx = next((i for i, c in enumerate(cols_lower) if "status code" in c), None)
-        if col_status_idx is not None:
-            status_series = pd.to_numeric(df.iloc[:, col_status_idx], errors='coerce')
-            clean_df = clean_df[status_series == 200]
+        # Estrazione Dati
+        clean_df['url'] = df[orig_cols[cols_lower.get_loc(col_url)]].astype(str)
+        
+        def safe_get(c_name):
+            if c_name: return df[orig_cols[cols_lower.get_loc(c_name)]].fillna("").astype(str)
+            return pd.Series([""] * len(df))
+
+        clean_df['title'] = safe_get(col_title)
+        clean_df['h1'] = safe_get(col_h1)
+        clean_df['desc'] = safe_get(col_desc)
+        clean_df['h2'] = safe_get(col_h2)
+        clean_df['body_text'] = safe_get(col_content) 
+        
+        # Path per matching
+        clean_df['path'] = clean_df['url'].apply(lambda x: urlparse(x).path)
+        
+        # Filtro Status 200 (Ridondante se abbiamo già filtrato HTML, ma utile per sicurezza)
+        col_status = next((c for c in cols_lower if "status code" in c), None)
+        if col_status:
+            idx = cols_lower.get_loc(col_status)
+            clean_df = clean_df[pd.to_numeric(df[orig_cols[idx]], errors='coerce') == 200]
             
         return clean_df
 
     except Exception as e:
-        st.error(f"Errore elaborazione dati: {e}")
-        return None
+        st.error(f"Errore struttura file: {e}"); return None
 
 def get_embedding_batch(text_list, client):
-    """Genera embedding in batch per risparmiare tempo e chiamate API."""
     try:
-        # Tronca testi troppo lunghi per evitare errori API (limite token)
-        clean_texts = [str(t)[:8000] for t in text_list] 
-        response = client.embeddings.create(
-            input=clean_texts,
-            model="text-embedding-3-small"
-        )
+        clean_texts = [str(t)[:6000].replace("\n", " ") for t in text_list] 
+        response = client.embeddings.create(input=clean_texts, model="text-embedding-3-small")
         return [data.embedding for data in response.data]
     except Exception as e:
-        st.error(f"Errore API OpenAI: {e}")
-        return []
+        st.error(f"OpenAI Error: {e}"); return []
 
-# --- INTERFACCIA UTENTE ---
+# --- INTERFACCIA ---
 
 col1, col2 = st.columns(2)
-
 with col1:
-    st.subheader("1. Vecchio Sito (Sorgente)")
-    # Accetta sia CSV che XLSX
-    old_file = st.file_uploader("Carica Export Vecchio (CSV/Excel)", type=["csv", "xlsx"], key="old")
-
+    st.subheader("1. Vecchio Sito")
+    old_file = st.file_uploader("Vecchio (CSV/Excel)", type=["csv", "xlsx"], key="old")
 with col2:
-    st.subheader("2. Nuovo Sito (Destinazione)")
-    # Accetta sia CSV che XLSX
-    new_file = st.file_uploader("Carica Export Nuovo (CSV/Excel)", type=["csv", "xlsx"], key="new")
+    st.subheader("2. Nuovo Sito")
+    new_file = st.file_uploader("Nuovo (CSV/Excel)", type=["csv", "xlsx"], key="new")
 
-# LOGICA PRINCIPALE
-if old_file and new_file and openai_api_key:
-    # Caricamento dati con la nuova funzione universale
+if old_file and new_file:
     df_old = load_sf_data(old_file)
     df_new = load_sf_data(new_file)
     
     if df_old is not None and df_new is not None:
-        st.info(f"Dati caricati correttamente: {len(df_old)} URL vecchi e {len(df_new)} URL nuovi.")
         
-        if st.button("🚀 Avvia Matching AI (Embeddings)"):
-            client = OpenAI(api_key=openai_api_key)
-            status = st.status("Elaborazione in corso...", expanded=True)
-            
-            # 1. PREPARAZIONE TESTO COMBINATO
-            status.write("🧠 Preparazione contesti semantici...")
-            df_old['combined_text'] = "URL: " + df_old['url'].astype(str) + " TITLE: " + df_old['title'].astype(str) + " H1: " + df_old['h1'].astype(str)
-            df_new['combined_text'] = "URL: " + df_new['url'].astype(str) + " TITLE: " + df_new['title'].astype(str) + " H1: " + df_new['h1'].astype(str)
-            
-            # 2. GENERAZIONE EMBEDDINGS (BATCH PROCESSING)
-            batch_size = 100
-            
-            # Vecchio Sito
-            status.write(f"Vettorializzazione Vecchio Sito ({len(df_old)} URL)...")
-            embeddings_old = []
-            prog_bar = status.progress(0)
-            for i in range(0, len(df_old), batch_size):
-                batch = df_old['combined_text'].iloc[i:i+batch_size].tolist()
-                emb = get_embedding_batch(batch, client)
-                embeddings_old.extend(emb)
-                prog_bar.progress(min((i + batch_size) / len(df_old), 1.0))
-            
-            # Nuovo Sito
-            status.write(f"Vettorializzazione Nuovo Sito ({len(df_new)} URL)...")
-            embeddings_new = []
-            prog_bar.progress(0)
-            for i in range(0, len(df_new), batch_size):
-                batch = df_new['combined_text'].iloc[i:i+batch_size].tolist()
-                emb = get_embedding_batch(batch, client)
-                embeddings_new.extend(emb)
-                prog_bar.progress(min((i + batch_size) / len(df_new), 1.0))
+        st.info(f"📁 **Analisi**: {len(df_old)} URL validi (HTML) nel vecchio sito vs {len(df_new)} nel nuovo.")
 
-            # 3. CALCOLO SIMILARITÀ E MATCHING
-            status.write("📐 Calcolo matrici di similarità...")
-            if embeddings_old and embeddings_new:
-                matrix_old = np.array(embeddings_old)
-                matrix_new = np.array(embeddings_new)
-                
-                # Cosine Similarity
-                similarity_matrix = cosine_similarity(matrix_old, matrix_new)
-                
-                matches = []
-                for idx, row in enumerate(similarity_matrix):
-                    best_match_idx = row.argmax()
-                    score = row[best_match_idx]
-                    
-                    old_url_val = df_old.iloc[idx]['url']
-                    
-                    # Applica soglia di confidenza
-                    if score >= threshold:
-                        new_url_val = df_new.iloc[best_match_idx]['url']
-                        new_title_val = df_new.iloc[best_match_idx]['title']
-                    else:
-                        new_url_val = ""
-                        new_title_val = ""
-                        
-                    matches.append({
-                        "Old URL": old_url_val,
-                        "Old Title": df_old.iloc[idx]['title'],
-                        "Suggested URL": new_url_val,
-                        "New Title": new_title_val,
-                        "Confidence": round(score * 100, 2)
+        # Rilevamento Testo
+        has_text = "body_text" in df_old.columns and df_old['body_text'].str.len().sum() > 100
+        if has_text:
+            st.success("✅ 'Body Text' rilevato! Analisi semantica potenziata.")
+        
+        if st.button("🚀 Avvia Hybrid Matching"):
+            
+            status = st.status("Fase 1: Smart Slug Matching (Logica)...", expanded=True)
+            results = []
+            
+            # --- FASE 1: LOGICAL MATCHING ---
+            new_map = dict(zip(df_new['path'], df_new['url']))
+            ai_old_indices = []
+            count_logical = 0
+            
+            for idx, row in df_old.iterrows():
+                old_path = row['path']
+                if old_path in new_map:
+                    results.append({
+                        "Old URL": row['url'],
+                        "Old Title": row['title'],
+                        "Suggested URL": new_map[old_path],
+                        "New Title": "Match Esatto Path",
+                        "Confidence": 100.0,
+                        "Method": "Slug Match ⚡"
                     })
+                    count_logical += 1
+                else:
+                    ai_old_indices.append(idx)
+            
+            status.write(f"✅ {count_logical} Match Logici. Procedo con AI per i restanti {len(ai_old_indices)} URL...")
+            
+            # --- FASE 2: AI MATCHING ---
+            if ai_old_indices and openai_api_key:
+                status.write("🧠 Fase 2: Analisi Semantica Profonda...")
                 
-                result_df = pd.DataFrame(matches)
-                status.update(label="Mapping Completato!", state="complete", expanded=False)
+                df_old_ai = df_old.loc[ai_old_indices].copy()
                 
-                # --- VISUALIZZAZIONE RISULTATI ---
-                st.subheader("🎯 Risultati Mapping")
+                def make_context(df):
+                    ctx = "URL: " + df['url'] + " | T: " + df['title'] + " | H1: " + df['h1']
+                    ctx += " | BODY: " + df['body_text'].str.slice(0, 1000)
+                    return ctx
+
+                df_old_ai['ctx'] = make_context(df_old_ai)
+                df_new['ctx'] = make_context(df_new)
                 
-                matched_count = len(result_df[result_df['Suggested URL'] != ""])
-                st.metric("URL Mappati con Successo", f"{matched_count} / {len(df_old)}", help=f"Match con confidenza > {threshold*100}%")
+                client = OpenAI(api_key=openai_api_key)
                 
-                st.dataframe(result_df)
+                # Embedding
+                emb_old = []
+                batch_s = 100
+                prog = status.progress(0)
                 
-                # DOWNLOAD CSV
-                csv = result_df.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 Scarica CSV Mapping", csv, "ai_redirect_mapping.csv", "text/csv")
+                # Embedding Old (Solo orfani)
+                for i in range(0, len(df_old_ai), batch_s):
+                    b = df_old_ai['ctx'].iloc[i:i+batch_s].tolist()
+                    emb_old.extend(get_embedding_batch(b, client))
+                    prog.progress(0.3)
                 
-                # GENERAZIONE HTACCESS
-                st.markdown("---")
-                st.subheader("📝 Codice .htaccess (Anteprima)")
-                htaccess_code = "# AI Generated Redirects 301\nRewriteEngine On\n\n"
+                # Embedding New (Tutti)
+                emb_new = []
+                for i in range(0, len(df_new), batch_s):
+                    b = df_new['ctx'].iloc[i:i+batch_s].tolist()
+                    emb_new.extend(get_embedding_batch(b, client))
+                    prog.progress(0.6)
+
+                if emb_old and emb_new:
+                    mat_old = np.array(emb_old)
+                    mat_new = np.array(emb_new)
+                    sims = cosine_similarity(mat_old, mat_new)
+                    
+                    for i, vector_idx in enumerate(df_old_ai.index):
+                        row_old = df_old.loc[vector_idx]
+                        scores = sims[i]
+                        best_idx = scores.argmax()
+                        score = scores[best_idx]
+                        
+                        if score >= threshold:
+                            new_row = df_new.iloc[best_idx]
+                            sug_url = new_row['url']
+                            sug_tit = new_row['title']
+                        else:
+                            sug_url = ""
+                            sug_tit = ""
+                        
+                        results.append({
+                            "Old URL": row_old['url'],
+                            "Old Title": row_old['title'],
+                            "Suggested URL": sug_url,
+                            "New Title": sug_tit,
+                            "Confidence": round(score * 100, 1),
+                            "Method": "AI Semantic 🧠"
+                        })
+
+            elif ai_old_indices and not openai_api_key:
+                st.warning("Inserisci API Key per il matching AI.")
                 
-                from urllib.parse import urlparse
-                for _, row in result_df.iterrows():
-                    if row['Suggested URL']:
+            # --- OUTPUT ---
+            final_df = pd.DataFrame(results)
+            status.update(label="Mapping Completato!", state="complete", expanded=False)
+            
+            st.subheader("🎯 Risultati Finali")
+            
+            col_m1, col_m2, col_m3 = st.columns(3)
+            col_m1.metric("URL HTML Analizzati", len(df_old))
+            col_m2.metric("Match Logici", count_logical)
+            col_m3.metric("Match AI", len(final_df) - count_logical)
+            
+            st.dataframe(final_df)
+            
+            csv = final_df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Scarica CSV Mapping", csv, "redirect_mapping_html_only.csv", "text/csv")
+            
+            with st.expander("Genera Codice .htaccess"):
+                code = "RewriteEngine On\n"
+                for _, r in final_df.iterrows():
+                    if r['Suggested URL']:
                         try:
-                            # Usa path relativi per evitare errori su domini diversi
-                            old_path = urlparse(str(row['Old URL'])).path
-                            new_path = urlparse(str(row['Suggested URL'])).path
-                            # Pulisce spazi vuoti
-                            if old_path and new_path:
-                                htaccess_code += f"Redirect 301 {old_path} {new_path}\n"
-                        except:
-                            pass
-                
-                with st.expander("Visualizza/Copia Codice .htaccess"):
-                    st.code(htaccess_code, language="apache")
-
-            else:
-                st.error("Errore critico: generazione embeddings fallita.")
-
-elif not openai_api_key:
-    st.warning("Inserisci la OpenAI API Key nella sidebar per iniziare.")
+                            o_p = urlparse(r['Old URL']).path
+                            n_p = urlparse(r['Suggested URL']).path
+                            if o_p != n_p:
+                                code += f"Redirect 301 {o_p} {n_p}\n"
+                        except: pass
+                st.code(code)
