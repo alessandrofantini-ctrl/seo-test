@@ -8,14 +8,14 @@ from io import BytesIO
 import re
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="Smart Language Redirect Mapper", layout="wide")
+st.set_page_config(page_title="Pure AI Redirect Mapper", layout="wide")
 
-st.title("🌐 Smart Language AI Redirect Mapper")
+st.title("🎯 Pure AI Redirect Mapper (No Catch-All)")
 st.markdown("""
-Strumento avanzato per migrazioni internazionali.
-1. **Riconoscimento Vocabolario 🇮🇹**: Capisce che "aggiornamento" o "chi-siamo" sono pagine Italiane.
-2. **Default Intelligente**: Imposta una lingua di base per le URL nella root (es. bossong.com -> IT).
-3. **Smart Home Catch-All 🏠**: Reindirizza alla Home corretta se l'AI fallisce.
+Strumento di precisione per migrazioni SEO.
+1. **AI Semantic 🧠**: Cerca la pagina specifica equivalente tramite il contenuto.
+2. **Fallback Inglese 🇬🇧**: Se non esiste in lingua locale, cerca la versione inglese.
+3. **Nessun Match Forzato**: Se l'AI non trova una corrispondenza, lascia il campo vuoto (per tua revisione o 404).
 """)
 
 # --- SIDEBAR ---
@@ -27,22 +27,17 @@ with st.sidebar:
     
     st.markdown("---")
     st.subheader("🌍 Gestione Lingue")
-    # NUOVO: Opzione per forzare la lingua di default
     default_lang_fallback = st.selectbox(
         "Lingua Default (se non rilevata dall'URL)",
         ["it", "en", "base"],
         index=0,
-        help="Se l'URL è 'sito.com/pagina', che lingua è? Per siti italiani con dominio .com, scegli 'it'."
+        help="Se l'URL è generico (es. sito.com/pagina), che lingua è? Per siti italiani su .com, scegli 'it'."
     )
     
     st.markdown("---")
     st.subheader("Soglie di Confidenza")
     threshold_primary = st.slider("Match Esatto (Contenuto)", 0.0, 1.0, 0.80)
     threshold_fallback = st.slider("Fallback Inglese", 0.0, 1.0, 0.75)
-    
-    st.markdown("---")
-    st.subheader("🚨 Rete di Sicurezza")
-    use_auto_home = st.checkbox("Usa Home Lingua come fallback", value=True)
 
 # --- FUNZIONI ---
 
@@ -130,13 +125,11 @@ def to_excel(df):
     return output.getvalue()
 
 def detect_language_code(url, default_fallback='base'):
-    """
-    Rileva lingua da URL usando struttura E vocabolario.
-    """
+    """Rileva lingua da URL usando struttura E vocabolario."""
     parsed = urlparse(url)
     domain = parsed.netloc
     path = parsed.path.lower()
-    slug = path # Usiamo tutto il path per cercare parole chiave
+    slug = path 
     
     # 1. STRUTTURA ESPLICITA
     if domain.endswith(".it"): return "it"
@@ -154,18 +147,16 @@ def detect_language_code(url, default_fallback='base'):
         if first in ['fr', 'fr-fr']: return "fr"
         if first in ['de', 'de-de']: return "de"
 
-    # 2. EURISTICA VOCABOLARIO (Per URL tipo bossong.com/aggiornamento)
-    # Parole chiave forti che identificano la lingua
+    # 2. EURISTICA VOCABOLARIO
     it_keywords = ['aggiornamento', 'prodotti', 'azienda', 'chi-siamo', 'contatti', 'servizi', 'novita', 'referenze', 'tecnica', 'scheda']
     en_keywords = ['about-us', 'company', 'products', 'news', 'contact', 'services', 'technical', 'sheet', 'references']
     
     for word in it_keywords:
         if word in slug: return "it"
-        
     for word in en_keywords:
         if word in slug: return "en"
     
-    # 3. FALLBACK UTENTE
+    # 3. FALLBACK
     return default_fallback
 
 def make_context_string(row, lang_code):
@@ -193,49 +184,26 @@ if old_files and new_files:
         
         st.info(f"📚 **Analisi**: {len(df_old)} URL Sorgente vs {len(df_new)} URL Destinazione.")
 
-        if st.button("🚀 Avvia Matching Intelligente"):
+        if st.button("🚀 Avvia Matching"):
             
             if not openai_api_key:
                 st.error("Inserisci API Key.")
             else:
-                status = st.status("Analisi Vocabolario e Struttura...", expanded=True)
+                status = st.status("Analisi in corso...", expanded=True)
                 
-                # 1. RILEVAMENTO LINGUE CON DEFAULT
-                # Passiamo il default scelto dall'utente nella sidebar
+                # 1. RILEVAMENTO LINGUE
                 df_old['lang'] = df_old['url'].apply(lambda x: detect_language_code(x, default_fallback=default_lang_fallback))
-                
-                # Per il nuovo sito, di solito la struttura è più pulita, ma usiamo lo stesso default o 'base'
                 df_new['lang'] = df_new['url'].apply(lambda x: detect_language_code(x, default_fallback='base'))
                 
-                # Debug Lingue rilevate
-                langs_detected = df_old['lang'].unique()
-                status.write(f"🌍 Lingue rilevate nel Vecchio Sito: {list(langs_detected)}")
+                status.write(f"🌍 Lingue Sorgente Rilevate: {list(df_old['lang'].unique())}")
                 
-                # --- IDENTIFICAZIONE HOMEPAGE PER OGNI LINGUA ---
-                language_homes = {}
-                unique_langs = df_new['lang'].unique()
-                
-                for lang in unique_langs:
-                    lang_urls = df_new[df_new['lang'] == lang]['url'].tolist()
-                    if lang_urls:
-                        # La più corta è la home
-                        shortest = min(lang_urls, key=len)
-                        language_homes[lang] = shortest
-                
-                # Se c'è una home 'base' nel nuovo sito e nessuna specifica per il default vecchio
-                if 'base' in language_homes and default_lang_fallback not in language_homes:
-                     language_homes[default_lang_fallback] = language_homes['base']
-
-                status.write(f"🏠 Homepage Rilevate: {language_homes}")
-                
-                # 2. CONTEXT & EMBEDDING
+                # 2. EMBEDDINGS
                 status.write("🧠 Generazione Embeddings...")
                 client = OpenAI(api_key=openai_api_key)
                 
                 df_old['ctx'] = df_old.apply(lambda r: make_context_string(r, r['lang']), axis=1)
                 df_new['ctx'] = df_new.apply(lambda r: make_context_string(r, r['lang']), axis=1)
                 
-                # Embedding Old
                 emb_old = []
                 batch_s = 100
                 prog = status.progress(0)
@@ -244,7 +212,6 @@ if old_files and new_files:
                     emb_old.extend(get_embedding_batch(b, client))
                     prog.progress(0.4)
                 
-                # Embedding New
                 emb_new = []
                 for i in range(0, len(df_new), batch_s):
                     b = df_new['ctx'].iloc[i:i+batch_s].tolist()
@@ -252,7 +219,7 @@ if old_files and new_files:
                     prog.progress(0.8)
 
                 # 3. MATCHING LOGIC
-                status.write("🔍 Ricerca Corrispondenze & Catch-All...")
+                status.write("🔍 Matching Intelligente...")
                 results = []
                 
                 if emb_old and emb_new:
@@ -270,7 +237,7 @@ if old_files and new_files:
                         best_score = 0.0
                         method = "Nessuno (404)"
                         
-                        # --- A: MATCH CONTENUTO (STESSA LINGUA) ---
+                        # A: Match Stessa Lingua
                         same_lang_indices = df_new.index[df_new['lang'] == old_lang].tolist()
                         
                         if same_lang_indices:
@@ -283,7 +250,7 @@ if old_files and new_files:
                                     best_score = local_score
                                     method = f"AI Match ({old_lang})"
 
-                        # --- B: FALLBACK CONTENUTO EN (AI) ---
+                        # B: Fallback EN
                         if not best_match_url and eng_indices and old_lang != 'en':
                             scores_eng = sims[i, eng_indices]
                             if len(scores_eng) > 0:
@@ -294,21 +261,7 @@ if old_files and new_files:
                                     best_score = local_score
                                     method = "AI Fallback EN"
                         
-                        # --- C: AUTO-HOME CATCH-ALL ---
-                        if not best_match_url and use_auto_home:
-                            # 1. Prova Home stessa lingua
-                            if old_lang in language_homes:
-                                best_match_url = language_homes[old_lang]
-                                method = f"Auto-Home ({old_lang})"
-                                best_score = 0.1 
-                            # 2. Prova Home Inglese
-                            elif 'en' in language_homes:
-                                best_match_url = language_homes['en']
-                                method = "Auto-Home (EN)"
-                            # 3. Prova Home Base
-                            elif 'base' in language_homes:
-                                best_match_url = language_homes['base']
-                                method = "Auto-Home (Base)"
+                        # C: CATCH-ALL RIMOSSO - Se non trova match, best_match_url resta vuoto stringa ""
 
                         results.append({
                             "Old URL": row_old['url'],
@@ -326,13 +279,13 @@ if old_files and new_files:
                 
                 # Metrics
                 total = len(final_df)
-                matched = len(final_df[final_df['Method'].str.contains("AI Match") | final_df['Method'].str.contains("Fallback")])
-                homes = len(final_df[final_df['Method'].str.contains("Auto-Home")])
+                matched = len(final_df[(final_df['New URL'] != "")])
+                unmapped = len(final_df[final_df['New URL'] == ""])
                 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Totale URL", total)
-                c2.metric("Redirect Specifici (AI)", matched)
-                c3.metric("Redirect Generici (Home)", homes)
+                c2.metric("Redirect Trovati (AI)", matched)
+                c3.metric("Non Mappati (404)", unmapped, delta_color="inverse")
                 
                 st.dataframe(final_df.head(50))
                 
@@ -340,8 +293,8 @@ if old_files and new_files:
                 excel_data = to_excel(export_df)
                 
                 st.download_button(
-                    label="📥 Scarica Excel Unificato",
+                    label="📥 Scarica Excel (Solo Redirect Trovati)",
                     data=excel_data,
-                    file_name="redirect_map_smart_lang.xlsx",
+                    file_name="redirect_map_precise.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
