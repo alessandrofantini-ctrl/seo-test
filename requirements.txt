@@ -3,3 +3,6 @@ requests
 beautifulsoup4
 openai
 python-docx
+pandas
+scikit-learn
+numpy
