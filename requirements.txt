@@ -8,3 +8,5 @@ scikit-learn
 numpy
 openpyxl
 xlsxwriter
+folium
+streamlit-folium
