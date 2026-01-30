@@ -9,6 +9,17 @@ from io import BytesIO
 # --- CONFIGURAZIONE ---
 st.set_page_config(page_title="SEO Content Strategist Pro", layout="wide")
 
+# --- DIZIONARIO MERCATI ---
+# Qui puoi aggiungere tutti i paesi che vuoi
+MARKETS = {
+    "🇮🇹 Italia": {"gl": "it", "hl": "it", "domain": "google.it"},
+    "🇺🇸 USA (English)": {"gl": "us", "hl": "en", "domain": "google.com"},
+    "🇬🇧 UK": {"gl": "uk", "hl": "en", "domain": "google.co.uk"},
+    "🇪🇸 Spagna": {"gl": "es", "hl": "es", "domain": "google.es"},
+    "🇫🇷 Francia": {"gl": "fr", "hl": "fr", "domain": "google.fr"},
+    "🇩🇪 Germania": {"gl": "de", "hl": "de", "domain": "google.de"},
+}
+
 # --- SIDEBAR ---
 with st.sidebar:
     st.title("⚙️ SEO Settings")
@@ -22,24 +33,39 @@ with st.sidebar:
         serp_api_key = st.secrets["SERP_API_KEY"]
 
     st.markdown("---")
+    st.subheader("🌍 Impostazioni Mercato")
+    # SELETTORE MERCATO
+    selected_market_label = st.selectbox("Seleziona Mercato Target", list(MARKETS.keys()))
+    market_params = MARKETS[selected_market_label] # Recupera i parametri (es. gl='us')
+
+    st.markdown("---")
     st.subheader("🎯 Target Cliente")
     client_url = st.text_input("URL Sito Cliente (Opzionale)", placeholder="https://www.tuosito.it")
-    custom_usp = st.text_area("USP / Punti di Forza", placeholder="Es. Officina autorizzata Bosch...", height=100)
+    custom_usp = st.text_area("USP / Punti di Forza", placeholder="Es. Spedizione in 24h...", height=100)
     tone_of_voice = st.selectbox("Tono di Voce", ["Autorevole & Tecnico", "Empatico & Problem Solving", "Diretto & Commerciale"])
 
 # --- MAIN PAGE ---
-st.title("🚀 SEO Brief Generator")
-st.markdown("Analizza SERP, PAA e Competitor per creare una strategia editoriale **semanticamente completa**.")
+st.title("🚀 SEO Brief Generator Multi-Country")
+st.markdown(f"Analisi impostata su: **{selected_market_label}**")
 
 col1, col2 = st.columns([3, 1])
 with col1:
-    keyword = st.text_input("Keyword Principale", placeholder="Es. manutenzione cambio automatico")
+    keyword = st.text_input("Keyword Principale", placeholder="Es. best automated gearbox repair")
 with col2:
     target_intent = st.selectbox("Intento", ["Informativo", "Commerciale", "Navigazionale"])
 
 # --- FUNZIONI ---
-def get_serp_data(query, api_key):
-    params = {"engine": "google", "q": query, "api_key": api_key, "hl": "it", "gl": "it"}
+
+# 1. MODIFICATA: Ora accetta gl, hl e domain come argomenti
+def get_serp_data(query, api_key, gl, hl, domain):
+    params = {
+        "engine": "google", 
+        "q": query, 
+        "api_key": api_key, 
+        "hl": hl,           # Lingua dinamica
+        "gl": gl,           # Paese dinamico
+        "google_domain": domain # Dominio dinamico
+    }
     try:
         response = requests.get("https://serpapi.com/search", params=params, timeout=20)
         response.raise_for_status()
@@ -48,6 +74,7 @@ def get_serp_data(query, api_key):
         return None
 
 def scrape_site_content(url, is_client=False):
+    # Usiamo un User-Agent generico internazionale
     ua = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
     data = {"url": url, "headers": [], "text_sample": "", "title": ""}
     try:
@@ -78,7 +105,7 @@ if st.button("Avvia Analisi Completa"):
     if not keyword or not openai_api_key or not serp_api_key:
         st.error("Inserisci Keyword e API Keys.")
     else:
-        status = st.status("Avvio motori di ricerca...", expanded=True)
+        status = st.status(f"Avvio scansione su {selected_market_label}...", expanded=True)
         try:
             # 1. ANALISI CLIENTE
             client_context_str = "Nessun sito cliente fornito. (Generico)"
@@ -90,17 +117,22 @@ if st.button("Avvia Analisi Completa"):
             if custom_usp:
                 client_context_str += f"\nUSP MANUALI: {custom_usp}"
 
-            # 2. SERP
-            status.write("🔍 Analisi SERP Google...")
-            serp = get_serp_data(keyword, serp_api_key)
+            # 2. SERP (Passiamo i parametri dinamici)
+            status.write(f"🔍 Analisi SERP ({market_params['domain']})...")
+            
+            # CHIAMATA AGGIORNATA
+            serp = get_serp_data(
+                keyword, 
+                serp_api_key, 
+                gl=market_params['gl'], 
+                hl=market_params['hl'], 
+                domain=market_params['domain']
+            )
             
             if serp and "organic_results" in serp:
                 urls = [res["link"] for res in serp["organic_results"][:4]]
                 
-                # ESTRAZIONE PAA (People Also Ask)
                 paa = [q.get("question") for q in serp.get("related_questions", [])]
-                
-                # ESTRAZIONE RICERCHE CORRELATE (Fondamentale per la semantica)
                 related_searches = [r.get("query") for r in serp.get("related_searches", [])]
                 
                 # 3. COMPETITOR
@@ -119,43 +151,47 @@ if st.button("Avvia Analisi Completa"):
                 # 4. AI STRATEGY
                 status.write("🧠 Elaborazione Mappa Semantica & Brief...")
                 
-                system_prompt = "Sei un Senior SEO Strategist. Il tuo obiettivo è creare un contenuto 'Skyscraper': più completo, approfondito e utile di qualsiasi competitor."
+                system_prompt = "Sei un Senior SEO Strategist Internazionale. Crei contenuti 'Skyscraper' superiori ai competitor."
                 
+                # Aggiorniamo il prompt per informare l'AI del mercato
                 user_prompt = f"""
                 OBIETTIVO: Creare il Brief SEO definitivo per la keyword: "{keyword}".
+                MERCATO TARGET: {selected_market_label} (Lingua: {market_params['hl']}).
                 INTENTO: {target_intent}.
                 TONO: {tone_of_voice}.
+                
+                IMPORTANTE: 
+                - Analizza i dati forniti che sono nella lingua del mercato target.
+                - Restituisci il Brief in ITALIANO (per il consulente) ma suggerisci H1/H2 e keyword nella LINGUA TARGET ({market_params['hl']}).
                 
                 ### DATI DI ANALISI (INPUT)
                 
                 1. IL NOSTRO BRAND (Contesto):
                 {client_context_str}
                 
-                2. I COMPETITOR (Struttura attuale in SERP):
+                2. I COMPETITOR (SERP {market_params['gl'].upper()}):
                 {competitor_text[:8000]}
                 
-                3. BISOGNI UTENTE (People Also Ask):
+                3. BISOGNI UTENTE (PAA):
                 {", ".join(paa) if paa else "Nessuna domanda specifica rilevata."}
                 
-                4. ARGOMENTI CORRELATI (Related Searches - Da coprire per rilevanza topica):
+                4. ARGOMENTI CORRELATI:
                 {", ".join(related_searches) if related_searches else "Nessuna correlata rilevata."}
                 
                 ### TASK: GENERA IL BRIEF
                 
-                Devi restituire un output strutturato in Markdown che includa:
+                Restituisci un output strutturato in Markdown:
                 
                 **SEZIONE A: ANALISI SEMANTICA**
                 - **Primary Keyword**: {keyword}
-                - **Keywords Secondarie & Entità**: Elenca 5-10 termini/concetti che DEVONO apparire nel testo (basandoti sulle Ricerche Correlate e PAA) per coprire l'argomento a 360°.
-                - **Gap Analysis**: Cosa manca ai competitor? Cosa possiamo aggiungere noi per vincere?
+                - **Keywords Secondarie (in {market_params['hl']})**: Elenca 5-10 termini.
+                - **Gap Analysis**: Cosa manca ai competitor in questo mercato specifico?
                 
-                **SEZIONE B: STRUTTURA DEL CONTENUTO (Outline)**
-                Crea una scaletta (H1, H2, H3) dettagliata.
-                - **H1**: Deve essere accattivante e contenere la keyword.
-                - **H2/H3**: Usa le PAA e le Ricerche Correlate come titoli dei paragrafi. Esempio: Se PAA è "Quanto costa X?", crea un H2 "Costi e Prezzi di X".
-                - **Istruzioni Copy**: Per OGNI H2, scrivi cosa trattare. Integra le USP del cliente dove pertinente.
-                - **Link Interni/Esterni**: Suggerisci dove inserire link a risorse autorevoli o servizi del cliente.
-                - **FAQ**: Includi una sezione finale con le domande PAA non trattate nel testo.
+                **SEZIONE B: STRUTTURA DEL CONTENUTO**
+                Crea una scaletta. 
+                - **H1 (in {market_params['hl']})**: Titolo ottimizzato.
+                - **H2/H3 (in {market_params['hl']})**: Usa PAA e Correlate.
+                - **Istruzioni Copy (in Italiano)**: Spiega cosa scrivere per ogni paragrafo.
                 """
                 
                 client = OpenAI(api_key=openai_api_key)
@@ -169,12 +205,8 @@ if st.button("Avvia Analisi Completa"):
                 status.update(label="Strategia Pronta!", state="complete", expanded=False)
                 st.markdown(output)
                 
-                # --- SALVATAGGIO PER PAGINA 2 ---
-                # Salviamo sia il brief che l'URL del cliente
                 st.session_state['ultimo_brief'] = output
                 st.session_state['client_url_session'] = client_url 
-                
-                st.success("✅ Brief salvato! Vai alla pagina 'Redattore Articoli' per generare il testo.")
                 
                 docx = create_docx(output, keyword)
                 st.download_button("📥 Scarica Brief .docx", docx, f"brief_{keyword.replace(' ','_')}.docx")
