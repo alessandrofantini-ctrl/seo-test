@@ -32,9 +32,6 @@ _Il secondo passo._ Trasforma il Brief generato in un **articolo completo**, for
 #### 3️⃣ 🔄 **[Redirect Assistant Pro](/Redirect_Generator)**
 _Per le migrazioni._ Strumento avanzato per mappare i redirect 301, gestire le lingue e creare file Excel pronti per i dev.
 
-#### 4️⃣ 🏔️ **[Bergamo Explorer (Demo)](/Bergamo_Explorer)**
-_Area Test._ Mappa interattiva dei sentieri delle Orobie. Dimostrazione delle capacità di visualizzazione dati geospaziali.
-
 ---
 """)
 
