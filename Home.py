@@ -8,7 +8,11 @@ st.set_page_config(
 )
 
 # --- HEADER CON LOGO E TITOLO ---
-st.image("https://www.lumicompany.it/_next/static/media/lumi_logo_black.b03993c0.svg", width=300)
+# Se il logo non carica, usa un'intestazione testuale
+try:
+    st.image("https://www.lumicompany.it/_next/static/media/lumi_logo_black.b03993c0.svg", width=300)
+except:
+    st.header("Lumi Company")
 
 st.title("✨ Lumi Company AI Suite")
 st.markdown("### Gli strumenti ufficiali per la strategia SEO di [www.lumicompany.it](https://www.lumicompany.it)")
@@ -26,7 +30,10 @@ _Il primo passo._ Analizza le keyword, studia i competitor e crea il **Brief Edi
 _Il secondo passo._ Trasforma il Brief generato in un **articolo completo**, formattato e ottimizzato per il blog di Lumi Company.
 
 #### 3️⃣ 🔄 **[Redirect Assistant Pro](/Redirect_Generator)**
-_Per le migrazioni._ Carica i CSV di Screaming Frog e usa l'AI per mappare automaticamente le vecchie URL sulle nuove, evitando errori 404.
+_Per le migrazioni._ Strumento avanzato per mappare i redirect 301, gestire le lingue e creare file Excel pronti per i dev.
+
+#### 4️⃣ 🏔️ **[Bergamo Explorer (Demo)](/Bergamo_Explorer)**
+_Area Test._ Mappa interattiva dei sentieri delle Orobie. Dimostrazione delle capacità di visualizzazione dati geospaziali.
 
 ---
 """)
