@@ -175,7 +175,7 @@ def parse_gsc(df_or_sheets):
     out["position"] = pd.to_numeric(df[c_pos], errors="coerce") if c_pos else np.nan
 
     out = out[out["url"].str.startswith("http", na=False)]
-    out["domain"] = out["url"].map(domain_of)
+    out["domain"] = out["url"].astype(str).apply(lambda x: urlparse(x).netloc.replace("www.", "").lower() if x else "")
 
     out["score_gsc"] = (
         np.log1p(out["impressions"].fillna(0))
