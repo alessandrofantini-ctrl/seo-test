@@ -57,6 +57,10 @@ def safe_text(s: str) -> str:
         return ""
     return re.sub(r"\s+", " ", s).strip()
 
+def truncate_chars(s: str, n: int) -> str:
+    s = safe_text(s)
+    return s[:n].rstrip()
+
 def domain_of(url: str) -> str:
     try:
         return urlparse(url).netloc.replace("www.", "")
@@ -76,8 +80,18 @@ def extract_json_ld(soup: BeautifulSoup):
             pass
     return out
 
+def remove_boilerplate(soup: BeautifulSoup):
+    for tag in soup(["script", "style", "noscript", "svg", "canvas", "iframe"]):
+        tag.decompose()
+    for selector in ["nav", "header", "footer", "aside", "form"]:
+        for tag in soup.select(selector):
+            tag.decompose()
+    for cls in ["cookie", "cookies", "cookie-banner", "newsletter", "modal", "popup"]:
+        for tag in soup.select(f".{cls}"):
+            tag.decompose()
+    return soup
+
 def detect_main_container(soup: BeautifulSoup):
-    # euristica: preferisci main/article; se troppo piccolo, fallback body
     for tag in ["article", "main"]:
         el = soup.find(tag)
         if el:
@@ -86,42 +100,14 @@ def detect_main_container(soup: BeautifulSoup):
                 return el
     return soup.body if soup.body else soup
 
-def remove_boilerplate(soup: BeautifulSoup):
-    # rimuove elementi tipicamente non contenuto
-    for tag in soup(["script", "style", "noscript", "svg", "canvas", "iframe"]):
-        tag.decompose()
-
-    for selector in ["nav", "header", "footer", "aside", "form"]:
-        for tag in soup.select(selector):
-            tag.decompose()
-
-    # rimuove sezioni ripetitive comuni
-    for cls in ["cookie", "cookies", "cookie-banner", "newsletter", "modal", "popup"]:
-        for tag in soup.select(f".{cls}"):
-            tag.decompose()
-
-    return soup
-
 def normalize_sentence_case(text: str) -> str:
-    """
-    Sentence case semplice:
-    - trim
-    - prima lettera maiuscola, resto invariato ma tende al minuscolo se tutto caps.
-    Non forza minuscolo su marchi/acronimi già presenti.
-    """
     t = safe_text(text)
     if not t:
         return ""
-    # se è tutto maiuscolo, abbassalo (utile quando i competitor sono in caps)
     if t.isupper() and len(t) > 6:
         t = t.lower()
     return t[0].upper() + t[1:] if len(t) > 1 else t.upper()
 
-def truncate_chars(s: str, n: int) -> str:
-    s = safe_text(s)
-    return s[:n].rstrip()
-
-# Stopword base multi-lingua (minimalista, per estrarre termini ricorrenti)
 STOPWORDS = set("""
 a al allo alla alle agli all' and are as at be by con che da dal dalla dalle degli dei del della delle di do
 e ed en est et for from il in is it la le lo los las les more nel nei nell' of on or per por pour que qui
@@ -130,8 +116,7 @@ su the to un una uno und une with y zu""".split())
 def tokenize(text: str):
     text = (text or "").lower()
     tokens = re.findall(r"[a-zàèéìòùäöüßñç0-9]{3,}", text, flags=re.I)
-    tokens = [t for t in tokens if t not in STOPWORDS]
-    return tokens
+    return [t for t in tokens if t not in STOPWORDS]
 
 # =========================
 # CACHING
@@ -185,12 +170,10 @@ def scrape_site_content(url, include_meta=True, include_schema=True, max_text_ch
         soup = BeautifulSoup(resp.text, "html.parser")
         soup = remove_boilerplate(soup)
 
-        # lang
         html_tag = soup.find("html")
         if html_tag and html_tag.get("lang"):
             data["lang"] = safe_text(html_tag.get("lang"))
 
-        # meta
         if include_meta:
             if soup.title and soup.title.string:
                 data["title"] = safe_text(soup.title.string)
@@ -204,35 +187,35 @@ def scrape_site_content(url, include_meta=True, include_schema=True, max_text_ch
         main = detect_main_container(soup)
 
         # headings
-        for tag in main.find_all(["h1", "h2", "h3"])[:60]:
+        for tag in main.find_all(["h1", "h2", "h3"])[:80]:
             txt = safe_text(tag.get_text(" ", strip=True))
             if not txt:
                 continue
             if tag.name == "h1" and not data["h1"]:
                 data["h1"] = txt
-            elif tag.name == "h2" and len(data["h2"]) < 25:
+            elif tag.name == "h2" and len(data["h2"]) < 30:
                 data["h2"].append(txt)
-            elif tag.name == "h3" and len(data["h3"]) < 35:
+            elif tag.name == "h3" and len(data["h3"]) < 45:
                 data["h3"].append(txt)
 
             if "?" in txt:
                 data["question_headings"].append(txt)
 
-        # testo: paragrafi + liste (molti competitor mettono valore nelle UL/LI)
+        # testo: paragrafi + liste
         paragraphs = main.find_all("p")
         lis = main.find_all("li")
 
         p_text = " ".join([safe_text(p.get_text(" ", strip=True)) for p in paragraphs])
-        li_text = " ".join([safe_text(li.get_text(" ", strip=True)) for li in lis[:120]])
+        li_text = " ".join([safe_text(li.get_text(" ", strip=True)) for li in lis[:140]])
 
         text_content = safe_text((p_text + " " + li_text).strip())
         if len(text_content) > max_text_chars:
             text_content = text_content[:max_text_chars]
 
         data["word_count"] = len(text_content.split()) if text_content else 0
-        data["text_sample"] = text_content[:2200]
+        data["text_sample"] = text_content[:2400]
 
-        # top terms (per competitor)
+        # top terms
         toks = tokenize(text_content)
         common = Counter(toks).most_common(25)
         data["top_terms"] = [t for t, _ in common]
@@ -325,53 +308,30 @@ def create_docx_from_markdownish(content_md: str, kw: str):
     return bio
 
 def aggregate_competitor_insights(competitors, target_lang):
-    """
-    Aggrega segnali concreti:
-    - H2 più ricorrenti (normalizzati)
-    - termini più ricorrenti nel body
-    - domande ricorrenti
-    """
-    h2_all = []
-    terms_all = []
-    q_all = []
+    h2_all, terms_all, q_all = [], [], []
 
     for c in competitors:
-        # usa solo competitor coerenti lingua, se disponibile
-        if c.get("lang") and target_lang and c["lang"][:2].lower() != target_lang[:2].lower():
-            # non scartare sempre: alcuni non dichiarano bene lang. Qui facciamo soft skip.
-            pass
-
-        for h2 in c.get("h2", [])[:25]:
+        for h2 in c.get("h2", [])[:30]:
             h = safe_text(h2)
             if h:
                 h2_all.append(h.lower())
         for t in c.get("top_terms", [])[:25]:
             terms_all.append(t.lower())
-        for q in c.get("question_headings", [])[:20]:
+        for q in c.get("question_headings", [])[:25]:
             qq = safe_text(q)
             if qq:
                 q_all.append(qq.lower())
 
-    # normalizzazione leggera per raggruppare varianti
     def norm_heading(h):
         h = re.sub(r"\s+", " ", h)
         h = re.sub(r"[^\w\sàèéìòùäöüßñç-]", "", h)
         return h.strip()
 
-    h2_counts = Counter([norm_heading(x) for x in h2_all if x])
-    top_h2 = [normalize_sentence_case(x) for x, _ in h2_counts.most_common(12)]
+    top_h2 = [normalize_sentence_case(x) for x, _ in Counter([norm_heading(x) for x in h2_all if x]).most_common(12)]
+    top_terms = [x for x, _ in Counter([x for x in terms_all if x and x not in STOPWORDS]).most_common(20)]
+    top_q = [normalize_sentence_case(x) for x, _ in Counter([norm_heading(x) for x in q_all if x]).most_common(8)]
 
-    term_counts = Counter([x for x in terms_all if x and x not in STOPWORDS])
-    top_terms = [x for x, _ in term_counts.most_common(20)]
-
-    q_counts = Counter([norm_heading(x) for x in q_all if x])
-    top_q = [normalize_sentence_case(x) for x, _ in q_counts.most_common(8)]
-
-    return {
-        "top_h2": top_h2,
-        "top_terms": top_terms,
-        "top_questions": top_q
-    }
+    return {"top_h2": top_h2, "top_terms": top_terms, "top_questions": top_q}
 
 # =========================
 # SIDEBAR
@@ -379,7 +339,7 @@ def aggregate_competitor_insights(competitors, target_lang):
 with st.sidebar:
     st.title("⚙️ SEO settings")
 
-    # BLOCCO CHIAVI INVARIATO
+    # BLOCCO CHIAVI (come richiesto)
     openai_api_key = st.text_input("OpenAI key", type="password")
     serp_api_key = st.text_input("SerpApi key", type="password")
     if not openai_api_key and "OPENAI_API_KEY" in st.secrets:
@@ -395,7 +355,6 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("🏷️ Brand")
     brand_name = st.text_input("Nome azienda/brand (per meta title/description)", placeholder="Es. Nome azienda")
-    st.caption("Userà il formato: “keyword | Nome azienda” (salvo necessità di varianti).")
 
     st.markdown("---")
     st.subheader("🎯 Target cliente")
@@ -416,10 +375,9 @@ with st.sidebar:
     include_meta = st.toggle("Estrai meta (title/description/canonical)", value=True)
 
     st.markdown("---")
-    st.subheader("🧾 Output")
-    include_json_block = st.toggle("Includi blocco JSON finale", value=False)
+    st.subheader("🤖 Modello")
     model_name = st.selectbox("Modello", ["gpt-4o", "gpt-4o-mini"], index=0)
-    st.caption("Output sempre compatto e operativo.")
+    include_json_block = st.toggle("Includi blocco JSON finale", value=False)
 
 # =========================
 # MAIN
@@ -432,6 +390,8 @@ with col1:
     keyword = st.text_input("Keyword principale", placeholder="Es. impianti elettrici industriali")
 with col2:
     target_intent = st.selectbox("Intento", ["Informativo", "Commerciale", "Navigazionale"])
+
+st.caption("Nota: SerpApi fornisce la SERP (title/snippet/link). Il contenuto dei competitor viene letto via scraping HTML.")
 
 # =========================
 # ACTION
@@ -461,9 +421,9 @@ if st.button("Avvia analisi"):
     organic_urls = [x["link"] for x in serp_snapshot["organic"] if x.get("link")][:max_competitors]
 
     with st.expander("SERP snapshot (debug)", expanded=False):
-        st.json(serp_snapshot)
+        st.json(serp_snapshot, expanded=2)
 
-    # 2) CLIENT (opzionale, super leggero)
+    # 2) CLIENT (opzionale, light)
     client_context = ""
     if client_url:
         status.write("🏢 Lettura sito cliente (light)…")
@@ -473,7 +433,7 @@ if st.button("Avvia analisi"):
                 f"Brand site title: {truncate_chars(cd.get('title',''), 120)}\n"
                 f"Brand meta description: {truncate_chars(cd.get('meta_description',''), 200)}\n"
                 f"Brand H1: {truncate_chars(cd.get('h1',''), 120)}\n"
-                f"Brand excerpt: {truncate_chars(cd.get('text_sample',''), 500)}"
+                f"Brand excerpt: {truncate_chars(cd.get('text_sample',''), 520)}"
             )
         else:
             client_context = "Sito cliente non leggibile o bloccato."
@@ -481,7 +441,7 @@ if st.button("Avvia analisi"):
         client_context = "Nessun sito cliente fornito."
 
     if custom_usp:
-        client_context += f"\nUSP: {truncate_chars(custom_usp, 400)}"
+        client_context += f"\nUSP: {truncate_chars(custom_usp, 450)}"
 
     # 3) SCRAPING COMPETITOR (contenuto reale)
     status.write("⚔️ Scraping competitor (contenuto reale)…")
@@ -508,7 +468,41 @@ if st.button("Avvia analisi"):
         st.error("Non sono riuscito a leggere i competitor (403/timeout). Prova a ridurre competitor o parallelismo.")
         st.stop()
 
-    # 4) AGGREGA INSIGHTS (concreto)
+    # 🔎 DEBUG COMPETITOR (come SERP snapshot)
+    with st.expander("Competitor snapshot (debug)", expanded=False):
+        # ordina per presenza contenuto/word_count
+        competitor_results_sorted = sorted(competitor_results, key=lambda x: x.get("word_count", 0), reverse=True)
+        for c in competitor_results_sorted:
+            label = f"{c.get('domain','') or 'competitor'} — {truncate_chars(c.get('title',''), 70) or c.get('url','')}"
+            with st.expander(label, expanded=False):
+                debug_obj = {
+                    "url": c.get("url"),
+                    "domain": c.get("domain"),
+                    "lang": c.get("lang"),
+                    "meta": {
+                        "title": c.get("title"),
+                        "meta_description": c.get("meta_description"),
+                        "canonical": c.get("canonical"),
+                    },
+                    "headings": {
+                        "h1": c.get("h1"),
+                        "h2": c.get("h2", [])[:20],
+                        "h3": c.get("h3", [])[:25],
+                        "question_headings": c.get("question_headings", [])[:15],
+                    },
+                    "content": {
+                        "word_count": c.get("word_count", 0),
+                        "top_terms": c.get("top_terms", [])[:25],
+                        "text_sample": c.get("text_sample", ""),
+                    },
+                    "schema": {
+                        "schema_types": c.get("schema_types", [])[:25],
+                        "has_faq_schema": c.get("has_faq_schema", False),
+                    },
+                }
+                st.json(debug_obj, expanded=2)
+
+    # 4) AGGREGA INSIGHTS
     status.write("🧩 Aggregazione insight competitor…")
     agg = aggregate_competitor_insights(competitor_results, market_params["hl"])
 
@@ -518,32 +512,32 @@ if st.button("Avvia analisi"):
         manual_secs = [safe_text(x) for x in secondary_keywords_manual.splitlines() if safe_text(x)]
         manual_secs = manual_secs[:25]
 
-    # 6) Prompt: compatto, operativo, con regole title/desc e maiuscole
-    status.write("🧠 Generazione brief (output compatto)…")
-
-    system_prompt = (
-        "Sei un Senior SEO strategist. Produci brief pratici e brevi, orientati all'esecuzione. "
-        "Non inserire teoria: solo ciò che serve per scrivere una pagina che superi i competitor."
-    )
+    # 6) Prompt: outline H2/H3 obbligatorio
+    status.write("🧠 Generazione brief…")
 
     brand = safe_text(brand_name) if brand_name else ""
     target_lang = market_params["hl"]
 
-    # compattiamo competitor: evitiamo muri di testo nel prompt
     competitor_compact = []
     for c in competitor_results[:max_competitors]:
         competitor_compact.append({
             "url": c.get("url"),
-            "title": truncate_chars(c.get("title",""), 120),
-            "h1": truncate_chars(c.get("h1",""), 120),
-            "h2": [truncate_chars(x, 90) for x in (c.get("h2") or [])[:10]],
+            "title": truncate_chars(c.get("title", ""), 120),
+            "h1": truncate_chars(c.get("h1", ""), 120),
+            "h2": [truncate_chars(x, 90) for x in (c.get("h2") or [])[:12]],
+            "h3": [truncate_chars(x, 90) for x in (c.get("h3") or [])[:12]],
             "word_count": c.get("word_count", 0),
         })
+
+    system_prompt = (
+        "Sei un Senior SEO strategist. Produci brief pratici e brevi, orientati all'esecuzione. "
+        "Non inserire teoria: solo ciò che serve per scrivere una pagina migliore dei competitor."
+    )
 
     user_prompt = f"""
 Keyword principale: "{keyword}"
 Mercato: {selected_market_label}
-Lingua output SEO (title/desc/h1/h2): {target_lang}
+Lingua output SEO (meta/h1/h2/h3): {target_lang}
 Intento: {target_intent}
 Tono di voce: {tone_of_voice}
 Brand name: "{brand}" (se vuoto, non forzare il brand nel title)
@@ -558,7 +552,7 @@ SERP:
 Competitor (sintesi):
 {json.dumps(competitor_compact, ensure_ascii=False)}
 
-Pattern competitor (derivati dal contenuto):
+Pattern competitor:
 - H2 ricorrenti: {agg.get("top_h2", [])}
 - Termini ricorrenti: {agg.get("top_terms", [])[:18]}
 - Domande ricorrenti: {agg.get("top_questions", [])}
@@ -566,21 +560,20 @@ Pattern competitor (derivati dal contenuto):
 Contesto cliente:
 {client_context}
 
-REGOLE DI OUTPUT (IMPORTANTI):
-1) Output in ITALIANO per le istruzioni, ma:
-   - meta title/description/H1/H2 devono essere nella lingua target: {target_lang}
-2) Maiuscole: usa sentence case per title/description/H1/H2 (solo prima lettera maiuscola).
-   Non scrivere ogni parola con iniziale maiuscola. Mantieni acronimi e brand corretti.
+REGOLE IMPORTANTI:
+1) Output in ITALIANO per le istruzioni, ma meta title/description/H1/H2/H3 nella lingua target: {target_lang}.
+2) Maiuscole: sentence case per title/description/H1/H2/H3 (solo prima lettera maiuscola).
+   Non mettere la maiuscola a ogni parola. Mantieni acronimi e brand corretti.
 3) Meta title:
-   - preferisci formato: "keyword | Brand" (se Brand presente)
+   - preferisci "keyword | Brand" se Brand presente
    - max 60 caratteri
-   - 2 varianti alternative brevi
+   - 3 varianti (v1/v2/v3)
 4) Meta description:
    - max 155 caratteri
-   - 2 varianti (una più informativa, una più orientata alla conversione)
-5) Non scrivere testi lunghi: niente spiegoni, niente teoria. Solo bullet operativi.
+   - 3 varianti (v1 informativa, v2 conversione, v3 ibrida)
+5) Output compatto: niente spiegoni.
 
-FORMATTO DI RISPOSTA (molto compatto):
+FORMATTO DI RISPOSTA (obbligatorio):
 ## meta
 - title (v1): ...
 - title (v2): ...
@@ -592,8 +585,14 @@ FORMATTO DI RISPOSTA (molto compatto):
 ## h1
 - ...
 
-## outline
-Elenca max 10 H2 (in {target_lang}), e sotto ogni H2 una riga "cosa inserire" (in italiano).
+## outline (H2/H3)
+Scrivi massimo 10 H2. Per ogni H2 scrivi 2–4 H3.
+Formato:
+- H2: ...
+  - H3: ...
+  - H3: ...
+  - Nota (IT): una riga su cosa inserire e quali prove/esempi usare.
+
 Integra PAA e correlate dove utile.
 
 ## keyword set
@@ -624,8 +623,6 @@ Integra PAA e correlate dove utile.
 
     st.markdown(output)
 
-    st.session_state["ultimo_brief"] = output
-
     docx = create_docx_from_markdownish(output, keyword)
     st.download_button(
         "📥 Scarica brief .docx",
@@ -633,7 +630,6 @@ Integra PAA e correlate dove utile.
         f"brief_{keyword.replace(' ','_')}.docx"
     )
 
-    # JSON download (best-effort)
     json_match = re.search(r"```json\s*(\{.*?\})\s*```", output, flags=re.S)
     if json_match:
         try:
