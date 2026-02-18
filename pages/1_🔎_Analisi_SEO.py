@@ -8,10 +8,11 @@ import json
 import re
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
 from requests.adapters import HTTPAdapter, Retry
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="SEO Content Strategist Pro", layout="wide")
+st.set_page_config(page_title="SEO Brief Generator", layout="wide")
 
 # --- DIZIONARIO MERCATI ---
 MARKETS = {
@@ -48,57 +49,13 @@ UA = {
     )
 }
 
-# --- SIDEBAR ---
-with st.sidebar:
-    st.title("⚙️ SEO Settings")
-
-    # >>>>>>>>>>>> QUESTO BLOCCO RESTA INVARIATO (richiesta chiavi) <<<<<<<<<<<<
-    openai_api_key = st.text_input("OpenAI Key", type="password")
-    serp_api_key = st.text_input("SerpApi Key", type="password")
-
-    if not openai_api_key and "OPENAI_API_KEY" in st.secrets:
-        openai_api_key = st.secrets["OPENAI_API_KEY"]
-    if not serp_api_key and "SERP_API_KEY" in st.secrets:
-        serp_api_key = st.secrets["SERP_API_KEY"]
-    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-
-    st.markdown("---")
-    st.subheader("🌍 Impostazioni Mercato")
-    selected_market_label = st.selectbox("Seleziona Mercato Target", list(MARKETS.keys()))
-    market_params = MARKETS[selected_market_label]
-
-    st.markdown("---")
-    st.subheader("🎯 Target Cliente")
-    client_url = st.text_input("URL Sito Cliente (Opzionale)", placeholder="https://www.tuosito.it")
-    custom_usp = st.text_area("USP / Punti di Forza", placeholder="Es. Spedizione in 24h...", height=100)
-    tone_of_voice = st.selectbox("Tono di Voce", ["Autorevole & Tecnico", "Empatico & Problem Solving", "Diretto & Commerciale"])
-
-    st.markdown("---")
-    st.subheader("🔧 Modalità Analisi")
-    deep_mode = st.toggle("Deep mode (più competitor + più segnali)", value=True)
-    max_competitors = st.slider("Competitor da analizzare", min_value=2, max_value=10, value=6 if deep_mode else 3)
-    max_workers = st.slider("Parallelismo scraping", min_value=2, max_value=10, value=6)
-    include_schema = st.toggle("Estrai segnali schema (JSON-LD)", value=True)
-    include_meta = st.toggle("Estrai meta (title/description/canonical)", value=True)
-
-# --- MAIN PAGE ---
-st.title("🚀 SEO Brief Generator Multi-Country")
-st.markdown(f"Analisi impostata su: **{selected_market_label}**")
-
-col1, col2 = st.columns([3, 1])
-with col1:
-    keyword = st.text_input("Keyword Principale", placeholder="Es. best automated gearbox repair")
-with col2:
-    target_intent = st.selectbox("Intento", ["Informativo", "Commerciale", "Navigazionale"])
-
 # =========================
 # UTILS
 # =========================
 def safe_text(s: str) -> str:
     if not s:
         return ""
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+    return re.sub(r"\s+", " ", s).strip()
 
 def domain_of(url: str) -> str:
     try:
@@ -109,25 +66,72 @@ def domain_of(url: str) -> str:
 def extract_json_ld(soup: BeautifulSoup):
     scripts = soup.find_all("script", type="application/ld+json")
     out = []
-    for sc in scripts[:10]:
+    for sc in scripts[:12]:
         txt = sc.get_text(strip=True)
         if not txt:
             continue
         try:
-            data = json.loads(txt)
-            out.append(data)
+            out.append(json.loads(txt))
         except Exception:
-            # a volte è JSON-LD non valido (multipli oggetti, ecc.)
             pass
     return out
 
 def detect_main_container(soup: BeautifulSoup):
-    # euristica semplice: prova <article>, poi <main>, poi body
+    # euristica: preferisci main/article; se troppo piccolo, fallback body
     for tag in ["article", "main"]:
         el = soup.find(tag)
-        if el and len(el.get_text(" ", strip=True)) > 500:
-            return el
+        if el:
+            txt = el.get_text(" ", strip=True)
+            if txt and len(txt) > 600:
+                return el
     return soup.body if soup.body else soup
+
+def remove_boilerplate(soup: BeautifulSoup):
+    # rimuove elementi tipicamente non contenuto
+    for tag in soup(["script", "style", "noscript", "svg", "canvas", "iframe"]):
+        tag.decompose()
+
+    for selector in ["nav", "header", "footer", "aside", "form"]:
+        for tag in soup.select(selector):
+            tag.decompose()
+
+    # rimuove sezioni ripetitive comuni
+    for cls in ["cookie", "cookies", "cookie-banner", "newsletter", "modal", "popup"]:
+        for tag in soup.select(f".{cls}"):
+            tag.decompose()
+
+    return soup
+
+def normalize_sentence_case(text: str) -> str:
+    """
+    Sentence case semplice:
+    - trim
+    - prima lettera maiuscola, resto invariato ma tende al minuscolo se tutto caps.
+    Non forza minuscolo su marchi/acronimi già presenti.
+    """
+    t = safe_text(text)
+    if not t:
+        return ""
+    # se è tutto maiuscolo, abbassalo (utile quando i competitor sono in caps)
+    if t.isupper() and len(t) > 6:
+        t = t.lower()
+    return t[0].upper() + t[1:] if len(t) > 1 else t.upper()
+
+def truncate_chars(s: str, n: int) -> str:
+    s = safe_text(s)
+    return s[:n].rstrip()
+
+# Stopword base multi-lingua (minimalista, per estrarre termini ricorrenti)
+STOPWORDS = set("""
+a al allo alla alle agli all' and are as at be by con che da dal dalla dalle degli dei del della delle di do
+e ed en est et for from il in is it la le lo los las les more nel nei nell' of on or per por pour que qui
+su the to un una uno und une with y zu""".split())
+
+def tokenize(text: str):
+    text = (text or "").lower()
+    tokens = re.findall(r"[a-zàèéìòùäöüßñç0-9]{3,}", text, flags=re.I)
+    tokens = [t for t in tokens if t not in STOPWORDS]
+    return tokens
 
 # =========================
 # CACHING
@@ -151,30 +155,35 @@ def get_serp_data(query, api_key, gl, hl, domain):
         return None
 
 @st.cache_data(show_spinner=False, ttl=60 * 60)
-def scrape_site_content(url, include_meta=True, include_schema=True):
+def scrape_site_content(url, include_meta=True, include_schema=True, max_text_chars=9000):
+    """
+    Estrae segnali SEO + contenuto competitor (testo ripulito, headings, liste).
+    """
     data = {
         "url": url,
         "domain": domain_of(url),
         "title": "",
         "meta_description": "",
         "canonical": "",
-        "headers": [],
         "h1": "",
         "h2": [],
         "h3": [],
         "word_count": 0,
         "text_sample": "",
+        "top_terms": [],
         "lang": "",
         "schema_types": [],
         "has_faq_schema": False,
+        "question_headings": [],
     }
 
     try:
-        resp = HTTP.get(url, headers=UA, timeout=15, allow_redirects=True)
+        resp = HTTP.get(url, headers=UA, timeout=18, allow_redirects=True)
         if resp.status_code >= 400 or not resp.text:
             return None
 
         soup = BeautifulSoup(resp.text, "html.parser")
+        soup = remove_boilerplate(soup)
 
         # lang
         html_tag = soup.find("html")
@@ -188,34 +197,45 @@ def scrape_site_content(url, include_meta=True, include_schema=True):
             md = soup.find("meta", attrs={"name": "description"})
             if md and md.get("content"):
                 data["meta_description"] = safe_text(md.get("content"))
-
             canon = soup.find("link", rel=lambda x: x and "canonical" in x.lower())
             if canon and canon.get("href"):
                 data["canonical"] = safe_text(canon.get("href"))
 
-        # contenuto principale (euristica)
         main = detect_main_container(soup)
 
-        # headers
-        elements = main.find_all(["h1", "h2", "h3"])
-        for tag in elements[:30]:
+        # headings
+        for tag in main.find_all(["h1", "h2", "h3"])[:60]:
             txt = safe_text(tag.get_text(" ", strip=True))
             if not txt:
                 continue
-            data["headers"].append(f"[{tag.name.upper()}] {txt}")
             if tag.name == "h1" and not data["h1"]:
                 data["h1"] = txt
-            elif tag.name == "h2" and len(data["h2"]) < 15:
+            elif tag.name == "h2" and len(data["h2"]) < 25:
                 data["h2"].append(txt)
-            elif tag.name == "h3" and len(data["h3"]) < 20:
+            elif tag.name == "h3" and len(data["h3"]) < 35:
                 data["h3"].append(txt)
 
-        # testo
+            if "?" in txt:
+                data["question_headings"].append(txt)
+
+        # testo: paragrafi + liste (molti competitor mettono valore nelle UL/LI)
         paragraphs = main.find_all("p")
-        text_content = " ".join([safe_text(p.get_text(" ", strip=True)) for p in paragraphs])
-        text_content = safe_text(text_content)
+        lis = main.find_all("li")
+
+        p_text = " ".join([safe_text(p.get_text(" ", strip=True)) for p in paragraphs])
+        li_text = " ".join([safe_text(li.get_text(" ", strip=True)) for li in lis[:120]])
+
+        text_content = safe_text((p_text + " " + li_text).strip())
+        if len(text_content) > max_text_chars:
+            text_content = text_content[:max_text_chars]
+
         data["word_count"] = len(text_content.split()) if text_content else 0
-        data["text_sample"] = text_content[:1800]
+        data["text_sample"] = text_content[:2200]
+
+        # top terms (per competitor)
+        toks = tokenize(text_content)
+        common = Counter(toks).most_common(25)
+        data["top_terms"] = [t for t, _ in common]
 
         # schema
         if include_schema:
@@ -223,7 +243,6 @@ def scrape_site_content(url, include_meta=True, include_schema=True):
             types = set()
             has_faq = False
             for item in jlds:
-                # può essere dict o list
                 items = item if isinstance(item, list) else [item]
                 for it in items:
                     if isinstance(it, dict) and "@type" in it:
@@ -235,37 +254,12 @@ def scrape_site_content(url, include_meta=True, include_schema=True):
                             types.add(str(t))
                         if "FAQPage" in str(t):
                             has_faq = True
-            data["schema_types"] = sorted(types)[:20]
+            data["schema_types"] = sorted(types)[:25]
             data["has_faq_schema"] = has_faq
 
         return data
     except Exception:
         return None
-
-def summarize_competitor_for_prompt(comp):
-    # summary compatto, più segnale e meno token
-    parts = []
-    parts.append(f"URL: {comp['url']} (dominio: {comp.get('domain','')})")
-    if comp.get("title"):
-        parts.append(f"Title: {comp['title']}")
-    if comp.get("meta_description"):
-        parts.append(f"Meta description: {comp['meta_description']}")
-    if comp.get("h1"):
-        parts.append(f"H1: {comp['h1']}")
-    if comp.get("h2"):
-        parts.append("H2: " + " | ".join(comp["h2"][:10]))
-    if comp.get("word_count"):
-        parts.append(f"Word count stimata: {comp['word_count']}")
-    if comp.get("lang"):
-        parts.append(f"Lang: {comp['lang']}")
-    if comp.get("schema_types"):
-        parts.append("Schema types: " + ", ".join(comp["schema_types"][:10]))
-    if comp.get("has_faq_schema"):
-        parts.append("FAQ schema: sì")
-    # micro-estratto testo per contesto (limitato)
-    if comp.get("text_sample"):
-        parts.append(f"Estratto: {comp['text_sample']}")
-    return "\n".join(parts)
 
 def build_serp_snapshot(serp_json, max_items):
     snapshot = {
@@ -274,11 +268,9 @@ def build_serp_snapshot(serp_json, max_items):
         "related_searches": [],
         "features": [],
     }
-
     if not serp_json:
         return snapshot
 
-    # organic
     for res in serp_json.get("organic_results", [])[:max_items]:
         snapshot["organic"].append({
             "position": res.get("position"),
@@ -288,17 +280,14 @@ def build_serp_snapshot(serp_json, max_items):
             "source": res.get("source"),
         })
 
-    # people also ask / related questions
     for q in serp_json.get("related_questions", [])[:20]:
         if q.get("question"):
             snapshot["paa"].append(q.get("question"))
 
-    # related searches
     for r in serp_json.get("related_searches", [])[:20]:
         if r.get("query"):
             snapshot["related_searches"].append(r.get("query"))
 
-    # features euristiche (non sempre presenti in serpapi)
     if serp_json.get("answer_box"):
         snapshot["features"].append("answer_box")
     if serp_json.get("knowledge_graph"):
@@ -315,18 +304,13 @@ def build_serp_snapshot(serp_json, max_items):
     return snapshot
 
 def create_docx_from_markdownish(content_md: str, kw: str):
-    # docx più leggibile: heading + paragrafi, senza parser full markdown (semplice e robusto)
     doc = Document()
-    doc.add_heading(f"SEO Brief: {kw}", 0)
-
-    lines = content_md.splitlines()
-    for line in lines:
+    doc.add_heading(f"SEO brief: {kw}", 0)
+    for line in content_md.splitlines():
         l = line.strip()
         if not l:
             doc.add_paragraph("")
             continue
-
-        # headings markdown
         if l.startswith("### "):
             doc.add_heading(l.replace("### ", ""), level=3)
         elif l.startswith("## "):
@@ -335,226 +319,330 @@ def create_docx_from_markdownish(content_md: str, kw: str):
             doc.add_heading(l.replace("# ", ""), level=1)
         else:
             doc.add_paragraph(line)
-
     bio = BytesIO()
     doc.save(bio)
     bio.seek(0)
     return bio
 
+def aggregate_competitor_insights(competitors, target_lang):
+    """
+    Aggrega segnali concreti:
+    - H2 più ricorrenti (normalizzati)
+    - termini più ricorrenti nel body
+    - domande ricorrenti
+    """
+    h2_all = []
+    terms_all = []
+    q_all = []
+
+    for c in competitors:
+        # usa solo competitor coerenti lingua, se disponibile
+        if c.get("lang") and target_lang and c["lang"][:2].lower() != target_lang[:2].lower():
+            # non scartare sempre: alcuni non dichiarano bene lang. Qui facciamo soft skip.
+            pass
+
+        for h2 in c.get("h2", [])[:25]:
+            h = safe_text(h2)
+            if h:
+                h2_all.append(h.lower())
+        for t in c.get("top_terms", [])[:25]:
+            terms_all.append(t.lower())
+        for q in c.get("question_headings", [])[:20]:
+            qq = safe_text(q)
+            if qq:
+                q_all.append(qq.lower())
+
+    # normalizzazione leggera per raggruppare varianti
+    def norm_heading(h):
+        h = re.sub(r"\s+", " ", h)
+        h = re.sub(r"[^\w\sàèéìòùäöüßñç-]", "", h)
+        return h.strip()
+
+    h2_counts = Counter([norm_heading(x) for x in h2_all if x])
+    top_h2 = [normalize_sentence_case(x) for x, _ in h2_counts.most_common(12)]
+
+    term_counts = Counter([x for x in terms_all if x and x not in STOPWORDS])
+    top_terms = [x for x, _ in term_counts.most_common(20)]
+
+    q_counts = Counter([norm_heading(x) for x in q_all if x])
+    top_q = [normalize_sentence_case(x) for x, _ in q_counts.most_common(8)]
+
+    return {
+        "top_h2": top_h2,
+        "top_terms": top_terms,
+        "top_questions": top_q
+    }
+
 # =========================
-# UI ACTION
+# SIDEBAR
 # =========================
-if st.button("Avvia Analisi Completa"):
+with st.sidebar:
+    st.title("⚙️ SEO settings")
+
+    # BLOCCO CHIAVI INVARIATO
+    openai_api_key = st.text_input("OpenAI key", type="password")
+    serp_api_key = st.text_input("SerpApi key", type="password")
+    if not openai_api_key and "OPENAI_API_KEY" in st.secrets:
+        openai_api_key = st.secrets["OPENAI_API_KEY"]
+    if not serp_api_key and "SERP_API_KEY" in st.secrets:
+        serp_api_key = st.secrets["SERP_API_KEY"]
+
+    st.markdown("---")
+    st.subheader("🌍 Mercato")
+    selected_market_label = st.selectbox("Seleziona mercato target", list(MARKETS.keys()))
+    market_params = MARKETS[selected_market_label]
+
+    st.markdown("---")
+    st.subheader("🏷️ Brand")
+    brand_name = st.text_input("Nome azienda/brand (per meta title/description)", placeholder="Es. Nome azienda")
+    st.caption("Userà il formato: “keyword | Nome azienda” (salvo necessità di varianti).")
+
+    st.markdown("---")
+    st.subheader("🎯 Target cliente")
+    client_url = st.text_input("URL sito cliente (opzionale)", placeholder="https://www.tuosito.it")
+    custom_usp = st.text_area("USP / punti di forza (opzionale)", height=90)
+    tone_of_voice = st.selectbox("Tono di voce", ["Autorevole & tecnico", "Empatico & problem solving", "Diretto & commerciale"])
+
+    st.markdown("---")
+    st.subheader("🔑 Keyword secondarie (opzionale)")
+    secondary_keywords_manual = st.text_area("Una per riga", height=120)
+
+    st.markdown("---")
+    st.subheader("🔧 Analisi")
+    deep_mode = st.toggle("Deep mode (più competitor)", value=True)
+    max_competitors = st.slider("Competitor da analizzare", 2, 10, 6 if deep_mode else 3)
+    max_workers = st.slider("Parallelismo scraping", 2, 10, 6)
+    include_schema = st.toggle("Estrai schema (JSON-LD)", value=True)
+    include_meta = st.toggle("Estrai meta (title/description/canonical)", value=True)
+
+    st.markdown("---")
+    st.subheader("🧾 Output")
+    include_json_block = st.toggle("Includi blocco JSON finale", value=False)
+    model_name = st.selectbox("Modello", ["gpt-4o", "gpt-4o-mini"], index=0)
+    st.caption("Output sempre compatto e operativo.")
+
+# =========================
+# MAIN
+# =========================
+st.title("🚀 SEO brief generator multi-country")
+st.markdown(f"Analisi impostata su: **{selected_market_label}**")
+
+col1, col2 = st.columns([3, 1])
+with col1:
+    keyword = st.text_input("Keyword principale", placeholder="Es. impianti elettrici industriali")
+with col2:
+    target_intent = st.selectbox("Intento", ["Informativo", "Commerciale", "Navigazionale"])
+
+# =========================
+# ACTION
+# =========================
+if st.button("Avvia analisi"):
     if not keyword or not openai_api_key or not serp_api_key:
-        st.error("Inserisci Keyword e API Keys.")
+        st.error("Inserisci keyword e API keys.")
+        st.stop()
+
+    status = st.status(f"Avvio scansione su {selected_market_label}…", expanded=True)
+
+    # 1) SERP
+    status.write("🔍 Analisi SERP…")
+    serp = get_serp_data(
+        keyword,
+        serp_api_key,
+        gl=market_params["gl"],
+        hl=market_params["hl"],
+        domain=market_params["domain"]
+    )
+    if not serp or "organic_results" not in serp:
+        status.update(label="Errore SerpApi", state="error")
+        st.error("Nessun dato SERP. Verifica SerpApi key o query.")
+        st.stop()
+
+    serp_snapshot = build_serp_snapshot(serp, max_competitors)
+    organic_urls = [x["link"] for x in serp_snapshot["organic"] if x.get("link")][:max_competitors]
+
+    with st.expander("SERP snapshot (debug)", expanded=False):
+        st.json(serp_snapshot)
+
+    # 2) CLIENT (opzionale, super leggero)
+    client_context = ""
+    if client_url:
+        status.write("🏢 Lettura sito cliente (light)…")
+        cd = scrape_site_content(client_url, include_meta=True, include_schema=False, max_text_chars=4000)
+        if cd:
+            client_context = (
+                f"Brand site title: {truncate_chars(cd.get('title',''), 120)}\n"
+                f"Brand meta description: {truncate_chars(cd.get('meta_description',''), 200)}\n"
+                f"Brand H1: {truncate_chars(cd.get('h1',''), 120)}\n"
+                f"Brand excerpt: {truncate_chars(cd.get('text_sample',''), 500)}"
+            )
+        else:
+            client_context = "Sito cliente non leggibile o bloccato."
     else:
-        status = st.status(f"Avvio scansione su {selected_market_label}...", expanded=True)
-        try:
-            # 1) ANALISI CLIENTE
-            client_context_str = "Nessun sito cliente fornito. (Generico)"
-            client_data = None
-            if client_url:
-                status.write("🏢 Analisi identità cliente...")
-                client_data = scrape_site_content(
-                    client_url,
-                    include_meta=include_meta,
-                    include_schema=include_schema
-                )
-                if client_data:
-                    client_context_str = (
-                        f"SITO CLIENTE: {client_url}\n"
-                        f"TITLE: {client_data.get('title','')}\n"
-                        f"META DESC: {client_data.get('meta_description','')}\n"
-                        f"H1: {client_data.get('h1','')}\n"
-                        f"H2: {', '.join(client_data.get('h2',[])[:10])}\n"
-                        f"TESTO (estratto): {client_data.get('text_sample','')}"
-                    )
-                else:
-                    client_context_str = f"SITO CLIENTE: {client_url}\n(Non leggibile / errore scraping)"
+        client_context = "Nessun sito cliente fornito."
 
-            if custom_usp:
-                client_context_str += f"\nUSP MANUALI: {custom_usp}"
+    if custom_usp:
+        client_context += f"\nUSP: {truncate_chars(custom_usp, 400)}"
 
-            # 2) SERP
-            status.write(f"🔍 Analisi SERP ({market_params['domain']})...")
-            serp = get_serp_data(
-                keyword,
-                serp_api_key,
-                gl=market_params["gl"],
-                hl=market_params["hl"],
-                domain=market_params["domain"]
-            )
+    # 3) SCRAPING COMPETITOR (contenuto reale)
+    status.write("⚔️ Scraping competitor (contenuto reale)…")
+    competitor_results = []
+    prog = status.progress(0.0)
 
-            if not serp or "organic_results" not in serp:
-                status.update(label="Errore SerpApi", state="error")
-                st.error("Nessun dato trovato da Google. Verifica la SerpApi Key.")
-                st.stop()
+    futures = []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for u in organic_urls:
+            futures.append(ex.submit(scrape_site_content, u, include_meta, include_schema))
 
-            serp_snapshot = build_serp_snapshot(serp, max_competitors)
-            organic_urls = [x["link"] for x in serp_snapshot["organic"] if x.get("link")][:max_competitors]
+        done = 0
+        for fut in as_completed(futures):
+            done += 1
+            prog.progress(done / max(1, len(futures)))
+            comp = fut.result()
+            if comp:
+                competitor_results.append(comp)
 
-            with st.expander("🔎 SERP snapshot (debug utile)", expanded=False):
-                st.json(serp_snapshot)
+    prog.empty()
 
-            # 3) SCRAPING COMPETITOR (PARALLELO)
-            status.write("⚔️ Spionaggio Competitor (scraping parallelo)...")
-            competitor_results = []
-            progress = status.progress(0)
+    if not competitor_results:
+        status.update(label="Errore scraping", state="error")
+        st.error("Non sono riuscito a leggere i competitor (403/timeout). Prova a ridurre competitor o parallelismo.")
+        st.stop()
 
-            futures = []
-            with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                for u in organic_urls:
-                    futures.append(ex.submit(scrape_site_content, u, include_meta, include_schema))
+    # 4) AGGREGA INSIGHTS (concreto)
+    status.write("🧩 Aggregazione insight competitor…")
+    agg = aggregate_competitor_insights(competitor_results, market_params["hl"])
 
-                done = 0
-                for fut in as_completed(futures):
-                    done += 1
-                    progress.progress(done / max(1, len(futures)))
-                    comp = fut.result()
-                    if comp:
-                        competitor_results.append(comp)
+    # 5) Keyword secondarie manuali
+    manual_secs = []
+    if secondary_keywords_manual:
+        manual_secs = [safe_text(x) for x in secondary_keywords_manual.splitlines() if safe_text(x)]
+        manual_secs = manual_secs[:25]
 
-            progress.empty()
+    # 6) Prompt: compatto, operativo, con regole title/desc e maiuscole
+    status.write("🧠 Generazione brief (output compatto)…")
 
-            if not competitor_results:
-                status.update(label="Errore scraping competitor", state="error")
-                st.error("Non sono riuscito a leggere i competitor (403/timeout). Prova a ridurre parallelismo o competitor.")
-                st.stop()
+    system_prompt = (
+        "Sei un Senior SEO strategist. Produci brief pratici e brevi, orientati all'esecuzione. "
+        "Non inserire teoria: solo ciò che serve per scrivere una pagina che superi i competitor."
+    )
 
-            # 4) COMPRESS / SUMMARIZE PER PROMPT
-            status.write("🧩 Sintesi segnali competitor...")
-            competitor_summaries = []
-            for c in competitor_results[:max_competitors]:
-                competitor_summaries.append(summarize_competitor_for_prompt(c))
+    brand = safe_text(brand_name) if brand_name else ""
+    target_lang = market_params["hl"]
 
-            competitor_block = "\n\n---\n\n".join(competitor_summaries)
-            competitor_block = competitor_block[:12000]  # safety cap
+    # compattiamo competitor: evitiamo muri di testo nel prompt
+    competitor_compact = []
+    for c in competitor_results[:max_competitors]:
+        competitor_compact.append({
+            "url": c.get("url"),
+            "title": truncate_chars(c.get("title",""), 120),
+            "h1": truncate_chars(c.get("h1",""), 120),
+            "h2": [truncate_chars(x, 90) for x in (c.get("h2") or [])[:10]],
+            "word_count": c.get("word_count", 0),
+        })
 
-            paa = serp_snapshot.get("paa", [])
-            related_searches = serp_snapshot.get("related_searches", [])
-            serp_features = serp_snapshot.get("features", [])
+    user_prompt = f"""
+Keyword principale: "{keyword}"
+Mercato: {selected_market_label}
+Lingua output SEO (title/desc/h1/h2): {target_lang}
+Intento: {target_intent}
+Tono di voce: {tone_of_voice}
+Brand name: "{brand}" (se vuoto, non forzare il brand nel title)
 
-            # 5) AI STRATEGY
-            status.write("🧠 Elaborazione mappa semantica & brief...")
+Keyword secondarie già fornite (se presenti): {manual_secs if manual_secs else "Nessuna"}
 
-            system_prompt = (
-                "Sei un Senior SEO Strategist internazionale. "
-                "Crei brief operativi per contenuti 'skyscraper' superiori ai competitor, "
-                "con struttura chiara e indicazioni copy azionabili."
-            )
+SERP:
+- Features: {", ".join(serp_snapshot.get("features", [])) if serp_snapshot.get("features") else "N/D"}
+- PAA: {serp_snapshot.get("paa", [])[:10] if serp_snapshot.get("paa") else []}
+- Related searches: {serp_snapshot.get("related_searches", [])[:12] if serp_snapshot.get("related_searches") else []}
 
-            # Output: Markdown + un blocco JSON riutilizzabile (senza obbligare parsing complesso)
-            user_prompt = f"""
-OBIETTIVO: Creare il Brief SEO definitivo per la keyword: "{keyword}".
-MERCATO TARGET: {selected_market_label} (Lingua target: {market_params['hl']}).
-INTENTO: {target_intent}.
-TONO: {tone_of_voice}.
+Competitor (sintesi):
+{json.dumps(competitor_compact, ensure_ascii=False)}
 
-REGOLE IMPORTANTI:
-- Analizza i dati forniti (competitor e SERP) che sono nella lingua del mercato target.
-- Restituisci il brief in ITALIANO (per il consulente), ma suggerisci H1/H2, meta title/description e keyword nella LINGUA TARGET ({market_params['hl']}).
-- Sii specifico, niente frasi generiche. Evidenzia gap e opportunità reali.
+Pattern competitor (derivati dal contenuto):
+- H2 ricorrenti: {agg.get("top_h2", [])}
+- Termini ricorrenti: {agg.get("top_terms", [])[:18]}
+- Domande ricorrenti: {agg.get("top_questions", [])}
 
-### DATI DI ANALISI
+Contesto cliente:
+{client_context}
 
-1) BRAND (contesto):
-{client_context_str}
+REGOLE DI OUTPUT (IMPORTANTI):
+1) Output in ITALIANO per le istruzioni, ma:
+   - meta title/description/H1/H2 devono essere nella lingua target: {target_lang}
+2) Maiuscole: usa sentence case per title/description/H1/H2 (solo prima lettera maiuscola).
+   Non scrivere ogni parola con iniziale maiuscola. Mantieni acronimi e brand corretti.
+3) Meta title:
+   - preferisci formato: "keyword | Brand" (se Brand presente)
+   - max 60 caratteri
+   - 2 varianti alternative brevi
+4) Meta description:
+   - max 155 caratteri
+   - 2 varianti (una più informativa, una più orientata alla conversione)
+5) Non scrivere testi lunghi: niente spiegoni, niente teoria. Solo bullet operativi.
 
-2) SERP SNAPSHOT:
-- Features SERP rilevate: {", ".join(serp_features) if serp_features else "Nessuna feature specifica rilevata."}
-- PAA (People also ask): {", ".join(paa) if paa else "Nessuna domanda specifica rilevata."}
-- Related searches: {", ".join(related_searches) if related_searches else "Nessuna correlata rilevata."}
+FORMATTO DI RISPOSTA (molto compatto):
+## meta
+- title (v1): ...
+- title (v2): ...
+- title (v3): ...
+- description (v1): ...
+- description (v2): ...
+- description (v3): ...
 
-3) COMPETITOR (sintesi per URL):
-{competitor_block}
+## h1
+- ...
 
-### TASK: GENERA IL BRIEF
+## outline
+Elenca max 10 H2 (in {target_lang}), e sotto ogni H2 una riga "cosa inserire" (in italiano).
+Integra PAA e correlate dove utile.
 
-Restituisci un output strutturato in Markdown con queste sezioni:
+## keyword set
+- primary: ...
+- secondary (max 12): ... (usa anche quelle manuali se coerenti)
 
-## sezione a: analisi semantica
-- primary keyword
-- keywords secondarie (in {market_params['hl']}) 10-15
-- entità/concetti obbligatori 10 (in {market_params['hl']})
-- termini/angoli da evitare 5 (in {market_params['hl']} o IT se concetto)
-- gap analysis: cosa manca ai competitor in questo mercato specifico (bullet concreti)
-- intent check: l’intento scelto è coerente con la SERP? se no, proponi correzione
+## faq
+5 domande (in {target_lang}) + risposta 1 frase (in {target_lang})
 
-## sezione b: struttura del contenuto
-- meta title (in {market_params['hl']}, <= 60 caratteri)
-- meta description (in {market_params['hl']}, <= 155 caratteri)
-- h1 (in {market_params['hl']})
-- outline h2/h3 (in {market_params['hl']}) integrando PAA e correlate
-- per ogni H2: istruzioni copy in italiano (cosa scrivere, esempi di contenuti, prove/claim da includere)
+## cta
+3 CTA brevi (in italiano) coerenti con intento "{target_intent}"
 
-## sezione c: eeat e conversione
-- prove di autorevolezza da inserire (es. certificazioni, casi, dati, testimonianze) e dove metterle
-- faq consigliate 5-8 (in {market_params['hl']}) con risposta breve (in {market_params['hl']})
-- CTA e microconversioni (in italiano) adatte all’intento
-
-## sezione d: blocco json riutilizzabile
-Alla fine, aggiungi un blocco JSON in un code fence ```json con:
-{{
-  "market": "...",
-  "language": "...",
-  "primary_keyword": "...",
-  "secondary_keywords": [...],
-  "entities": [...],
-  "meta_title": "...",
-  "meta_description": "...",
-  "h1": "...",
-  "outline": [{{"h2": "...", "h3": ["..."]}}],
-  "faqs": [{{"q":"...","a":"..."}}],
-  "notes_it": "..."
-}}
-
-Non aggiungere testo dopo il blocco JSON.
+{"## json\nIncludi un blocco JSON minimale (solo meta, h1, outline, secondary, faq) in ```json```." if include_json_block else ""}
 """
 
-            client = OpenAI(api_key=openai_api_key)
-            resp = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.6
-            )
-            output = resp.choices[0].message.content
+    client = OpenAI(api_key=openai_api_key)
+    resp = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.5
+    )
+    output = resp.choices[0].message.content
 
-            status.update(label="Strategia pronta!", state="complete", expanded=False)
+    status.update(label="Brief pronto!", state="complete", expanded=False)
 
-            # Render
-            st.markdown(output)
+    st.markdown(output)
 
-            # Store
-            st.session_state["ultimo_brief"] = output
-            st.session_state["client_url_session"] = client_url
-            st.session_state["serp_snapshot"] = serp_snapshot
-            st.session_state["competitors"] = competitor_results
+    st.session_state["ultimo_brief"] = output
 
-            # Download docx
-            docx = create_docx_from_markdownish(output, keyword)
+    docx = create_docx_from_markdownish(output, keyword)
+    st.download_button(
+        "📥 Scarica brief .docx",
+        docx,
+        f"brief_{keyword.replace(' ','_')}.docx"
+    )
+
+    # JSON download (best-effort)
+    json_match = re.search(r"```json\s*(\{.*?\})\s*```", output, flags=re.S)
+    if json_match:
+        try:
+            parsed = json.loads(json_match.group(1))
             st.download_button(
-                "📥 Scarica Brief .docx",
-                docx,
-                f"brief_{keyword.replace(' ','_')}.docx"
+                "📥 Scarica brief JSON",
+                data=json.dumps(parsed, ensure_ascii=False, indent=2).encode("utf-8"),
+                file_name=f"brief_{keyword.replace(' ','_')}.json",
+                mime="application/json"
             )
-
-            # Download JSON estratto (best-effort)
-            json_match = re.search(r"```json\s*(\{.*?\})\s*```", output, flags=re.S)
-            if json_match:
-                try:
-                    parsed = json.loads(json_match.group(1))
-                    st.download_button(
-                        "📥 Scarica Brief JSON",
-                        data=json.dumps(parsed, ensure_ascii=False, indent=2).encode("utf-8"),
-                        file_name=f"brief_{keyword.replace(' ','_')}.json",
-                        mime="application/json"
-                    )
-                except Exception:
-                    pass
-
-        except Exception as e:
-            status.update(label="Errore", state="error")
-            st.error(f"Errore: {e}")
+        except Exception:
+            pass
