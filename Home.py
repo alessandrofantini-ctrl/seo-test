@@ -8,10 +8,9 @@ st.set_page_config(
 )
 
 # --- HEADER CON LOGO E TITOLO ---
-# Se il logo non carica, usa un'intestazione testuale
 try:
     st.image("https://www.lumicompany.it/_next/static/media/lumi_logo_black.b03993c0.svg", width=300)
-except:
+except Exception:
     st.header("Lumi Company")
 
 st.title("✨ Lumi Company AI Suite")
@@ -24,19 +23,25 @@ st.markdown("""
 Benvenuto nella dashboard operativa. Seleziona uno strumento dal menu laterale o usa i link rapidi qui sotto:
 
 #### 1️⃣ 🔎 **[Analisi & Strategia SEO](/Analisi_SEO)**
-_Il primo passo._ Analizza le keyword, studia i competitor e crea il **Brief Editoriale** perfetto per posizionarti su Google.
+_Il primo passo._ Analizza le keyword, studia i competitor e crea il **Brief editoriale** per posizionarti su Google.
 
-#### 2️⃣ ✍️ **[Redattore Articoli AI](/Redattore_Articoli)**
-_Il secondo passo._ Trasforma il Brief generato in un **articolo completo**, formattato e ottimizzato per il blog di Lumi Company.
+#### 2️⃣ ✍️ **[Redattore articoli AI](/Redattore_Articoli)**
+_Il secondo passo._ Trasforma il brief in un **articolo completo**, formattato e ottimizzato.
 
-#### 3️⃣ 🔄 **[Redirect Assistant Pro](/Redirect_Generator)**
-_Per le migrazioni._ Strumento avanzato per mappare i redirect 301, gestire le lingue e creare file Excel pronti per i dev.
+#### 3️⃣ 🔗 **[Internal link assistant](/Internal_link_assistant)**
+_Il terzo passo._ Inserisce **link interni in automatico** nel testo usando:
+- export **Google Search Console** (priorità pagine)
+- (opzionale) **crawl** tipo Screaming Frog (title/H1/meta)
+- **AI** per trovare il match migliore tra paragrafi e pagine.
+
+#### 4️⃣ 🔄 **[Redirect assistant pro](/Redirect_Generator)**
+_Per le migrazioni._ Mappa redirect 301, gestisce le lingue e crea file Excel pronti per i dev.
 
 ---
 """)
 
 # --- FOOTER ---
-st.info("💡 **Workflow Consigliato:** Analisi SEO -> Redazione Articolo. Usa il Redirect Assistant solo in fase di restyling o migrazione.")
+st.info("💡 Workflow consigliato: Analisi SEO → Redazione articolo → Internal linking. Usa il Redirect assistant solo in fase di restyling o migrazione.")
 
 st.markdown(
     """
