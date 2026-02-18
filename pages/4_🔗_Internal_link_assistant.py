@@ -80,14 +80,33 @@ article_text = st.text_area(
 # =========================
 # HELPERS (I/O)
 # =========================
+
 def load_file(uploaded):
+    """
+    Ritorna:
+    - DataFrame se CSV o XLSX con un solo sheet
+    - dict {sheet_name: DataFrame} se XLSX con più sheet
+    """
     if uploaded is None:
         return None
+
     name = (uploaded.name or "").lower()
     try:
         if name.endswith((".xlsx", ".xls")):
-            return pd.read_excel(uploaded, engine="openpyxl")
-        # csv
+            uploaded.seek(0)
+            xls = pd.ExcelFile(uploaded, engine="openpyxl")
+            if len(xls.sheet_names) <= 1:
+                return pd.read_excel(xls, sheet_name=xls.sheet_names[0])
+            # più sheet: leggili tutti e fai scegliere al parser quello giusto
+            sheets = {}
+            for sh in xls.sheet_names:
+                try:
+                    sheets[sh] = pd.read_excel(xls, sheet_name=sh)
+                except Exception:
+                    continue
+            return sheets
+
+        # CSV
         for enc in ["utf-8", "utf-8-sig", "ISO-8859-1", "cp1252"]:
             try:
                 uploaded.seek(0)
@@ -98,80 +117,66 @@ def load_file(uploaded):
     except Exception:
         return None
 
-def norm_url(u):
-    u = "" if u is None else str(u).strip()
-    if not u:
-        return ""
-    # lascia la URL così com’è, ma pulisci spazi e caratteri strani
-    return u
 
-def domain_of(u):
-    try:
-        return urlparse(u).netloc.replace("www.", "").lower()
-    except Exception:
-        return ""
-
-def slug_tokens(u):
-    try:
-        p = urlparse(u).path.lower()
-    except Exception:
-        p = (u or "").lower()
-    toks = re.findall(r"[a-z0-9]{3,}", p)
-    stop = {"html", "php", "asp", "aspx", "index"}
-    return [t for t in toks if t not in stop]
-
-def safe_text(x):
-    if x is None:
-        return ""
-    try:
-        if pd.isna(x):
-            return ""
-    except Exception:
-        pass
-    return re.sub(r"\s+", " ", str(x)).strip()
-
-# =========================
-# PARSERS (GSC + CRAWL)
-# =========================
-def parse_gsc(df):
+def parse_gsc(df_or_sheets):
     """
-    Accetta export GSC con colonne tipiche:
-    - Page / Pagina
-    - Clicks / Clic
-    - Impressions / Impressioni
-    - CTR
-    - Position / Posizione
+    Supporta:
+    - CSV export GSC (un df)
+    - XLSX export GSC con più fogli (dict di df): seleziona automaticamente il foglio "Pagine/Pages"
+      oppure quello che contiene una colonna pagina.
     """
+    if df_or_sheets is None:
+        return None
+
+    # Se è un dict di sheet, prova quelli più probabili prima
+    if isinstance(df_or_sheets, dict):
+        preferred = ["Pagine", "Pages", "Pagine principali", "Page", "Pagina"]
+        # 1) tenta per nome sheet
+        for sh in preferred:
+            for sheet_name, df in df_or_sheets.items():
+                if sh.lower() in sheet_name.lower():
+                    out = parse_gsc(df)  # ricorsione su df singolo
+                    if out is not None and not out.empty:
+                        return out
+        # 2) altrimenti prova tutti gli sheet e prendi il primo che funziona
+        for sheet_name, df in df_or_sheets.items():
+            out = parse_gsc(df)
+            if out is not None and not out.empty:
+                return out
+        return None
+
+    # Da qui in poi: df singolo
+    df = df_or_sheets
     if df is None or df.empty:
         return None
 
     cols = {c.lower().strip(): c for c in df.columns}
-    def find_col(keys):
-        for k in keys:
+
+    def find_col(candidates):
+        for cand in candidates:
             for lc, orig in cols.items():
-                if k in lc:
+                if cand in lc:
                     return orig
         return None
 
-    c_page = find_col(["page", "pagina", "url"])
-    c_click = find_col(["click"])
-    c_impr = find_col(["impression"])
-    c_pos = find_col(["position", "posizione"])
+    # Colonna URL: nei report GSC in italiano è spesso "Pagine principali"
+    c_page = find_col(["page", "pagina", "pagine principali", "pagina principale", "url"])
+    c_click = find_col(["click", "clic"])
+    c_impr = find_col(["impression", "impressioni"])
+    c_pos  = find_col(["position", "posizione"])
 
     if not c_page:
         return None
 
     out = pd.DataFrame()
-    out["url"] = df[c_page].map(norm_url)
+    out["url"] = df[c_page].astype(str).str.strip()
     out["clicks"] = pd.to_numeric(df[c_click], errors="coerce") if c_click else 0
     out["impressions"] = pd.to_numeric(df[c_impr], errors="coerce") if c_impr else 0
     out["position"] = pd.to_numeric(df[c_pos], errors="coerce") if c_pos else np.nan
 
-    out["url"] = out["url"].astype(str)
     out = out[out["url"].str.startswith("http", na=False)]
     out["domain"] = out["url"].map(domain_of)
 
-    # priorità: impressions + clicks (log), penalizza posizioni molto alte (già forti) leggermente
     out["score_gsc"] = (
         np.log1p(out["impressions"].fillna(0))
         + 1.5 * np.log1p(out["clicks"].fillna(0))
@@ -181,47 +186,6 @@ def parse_gsc(df):
     out = out.drop_duplicates(subset=["url"]).reset_index(drop=True)
     return out
 
-def parse_crawl(df):
-    """
-    Accetta export crawl tipo Screaming Frog:
-    - Address
-    - Title 1
-    - H1-1
-    - Meta Description 1
-    - Language (opzionale)
-    - Status Code / Content Type (opzionale)
-    """
-    if df is None or df.empty:
-        return None
-
-    cols = {c.lower().strip(): c for c in df.columns}
-    def find_col(keys):
-        for k in keys:
-            for lc, orig in cols.items():
-                if k in lc:
-                    return orig
-        return None
-
-    c_url = find_col(["address", "url", "pagina"])
-    if not c_url:
-        return None
-
-    c_title = find_col(["title 1", "title"])
-    c_h1 = find_col(["h1-1", "h1"])
-    c_md = find_col(["meta description 1", "meta description", "description"])
-    c_lang = find_col(["language", "lingua"])
-
-    out = pd.DataFrame()
-    out["url"] = df[c_url].map(norm_url)
-    out["title"] = df[c_title].map(safe_text) if c_title else ""
-    out["h1"] = df[c_h1].map(safe_text) if c_h1 else ""
-    out["meta"] = df[c_md].map(safe_text) if c_md else ""
-    out["lang"] = df[c_lang].map(safe_text).str.lower() if c_lang else ""
-
-    out["domain"] = out["url"].map(domain_of)
-    out = out[out["url"].astype(str).str.startswith("http", na=False)]
-    out = out.drop_duplicates(subset=["url"]).reset_index(drop=True)
-    return out
 
 # =========================
 # EMBEDDINGS
