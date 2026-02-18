@@ -6,6 +6,7 @@ from io import BytesIO
 from urllib.parse import urlparse
 from openai import OpenAI
 from sklearn.metrics.pairwise import cosine_similarity
+from collections import Counter
 
 # =========================
 # CONFIG
@@ -39,9 +40,7 @@ with st.sidebar:
     st.markdown(
         """
 Carica almeno **GSC** (consigliato).  
-Il **crawl** (Screaming Frog / simili) migliora moltissimo la qualità del matching perché aggiunge title/H1/estratto.
-
-Il tool inserisce link in modo prudente: pochi link, niente ripetizioni, anchor naturali.
+Il **crawl** (Screaming Frog / simili) migliora la qualità del matching perché aggiunge title/H1/description e lingua.
 """
     )
 
@@ -58,7 +57,7 @@ Il tool inserisce link in modo prudente: pochi link, niente ripetizioni, anchor 
 
     st.markdown("---")
     st.subheader("Lingua")
-    st.markdown("Se hai la colonna Language nel crawl, filtriamo automaticamente per lingua dell’articolo.")
+    st.caption("Se nel crawl è presente la colonna Language, il tool filtra automaticamente per lingua.")
     manual_lang = st.selectbox("Lingua articolo (fallback)", ["auto", "it", "en", "es", "fr", "de"], index=0)
 
 # =========================
@@ -78,14 +77,45 @@ article_text = st.text_area(
 )
 
 # =========================
-# HELPERS (I/O)
+# HELPERS
 # =========================
+def safe_text(x) -> str:
+    if x is None:
+        return ""
+    try:
+        if pd.isna(x):
+            return ""
+    except Exception:
+        pass
+    return re.sub(r"\s+", " ", str(x)).strip()
 
+def domain_of(u: str) -> str:
+    try:
+        return urlparse(u).netloc.replace("www.", "").lower()
+    except Exception:
+        return ""
+
+def norm_url(u: str) -> str:
+    u = safe_text(u)
+    return u
+
+def slug_tokens(u: str):
+    try:
+        p = urlparse(u).path.lower()
+    except Exception:
+        p = (u or "").lower()
+    toks = re.findall(r"[a-z0-9]{3,}", p)
+    stop = {"html", "php", "asp", "aspx", "index"}
+    return [t for t in toks if t not in stop]
+
+# =========================
+# FILE LOADING (CSV + XLSX multi-sheet)
+# =========================
 def load_file(uploaded):
     """
     Ritorna:
     - DataFrame se CSV o XLSX con un solo sheet
-    - dict {sheet_name: DataFrame} se XLSX con più sheet
+    - dict {sheet_name: DataFrame} se XLSX con più sheet (tipico export GSC)
     """
     if uploaded is None:
         return None
@@ -97,7 +127,6 @@ def load_file(uploaded):
             xls = pd.ExcelFile(uploaded, engine="openpyxl")
             if len(xls.sheet_names) <= 1:
                 return pd.read_excel(xls, sheet_name=xls.sheet_names[0])
-            # più sheet: leggili tutti e fai scegliere al parser quello giusto
             sheets = {}
             for sh in xls.sheet_names:
                 try:
@@ -117,7 +146,9 @@ def load_file(uploaded):
     except Exception:
         return None
 
-
+# =========================
+# PARSERS (GSC + CRAWL)
+# =========================
 def parse_gsc(df_or_sheets):
     """
     Supporta:
@@ -128,24 +159,24 @@ def parse_gsc(df_or_sheets):
     if df_or_sheets is None:
         return None
 
-    # Se è un dict di sheet, prova quelli più probabili prima
+    # multi-sheet
     if isinstance(df_or_sheets, dict):
         preferred = ["Pagine", "Pages", "Pagine principali", "Page", "Pagina"]
-        # 1) tenta per nome sheet
         for sh in preferred:
             for sheet_name, df in df_or_sheets.items():
                 if sh.lower() in sheet_name.lower():
-                    out = parse_gsc(df)  # ricorsione su df singolo
+                    out = parse_gsc(df)
                     if out is not None and not out.empty:
+                        out.attrs["gsc_sheet_used"] = sheet_name
                         return out
-        # 2) altrimenti prova tutti gli sheet e prendi il primo che funziona
         for sheet_name, df in df_or_sheets.items():
             out = parse_gsc(df)
             if out is not None and not out.empty:
+                out.attrs["gsc_sheet_used"] = sheet_name
                 return out
         return None
 
-    # Da qui in poi: df singolo
+    # single df
     df = df_or_sheets
     if df is None or df.empty:
         return None
@@ -159,11 +190,10 @@ def parse_gsc(df_or_sheets):
                     return orig
         return None
 
-    # Colonna URL: nei report GSC in italiano è spesso "Pagine principali"
     c_page = find_col(["page", "pagina", "pagine principali", "pagina principale", "url"])
     c_click = find_col(["click", "clic"])
     c_impr = find_col(["impression", "impressioni"])
-    c_pos  = find_col(["position", "posizione"])
+    c_pos = find_col(["position", "posizione"])
 
     if not c_page:
         return None
@@ -175,7 +205,7 @@ def parse_gsc(df_or_sheets):
     out["position"] = pd.to_numeric(df[c_pos], errors="coerce") if c_pos else np.nan
 
     out = out[out["url"].str.startswith("http", na=False)]
-    out["domain"] = out["url"].astype(str).apply(lambda x: urlparse(x).netloc.replace("www.", "").lower() if x else "")
+    out["domain"] = out["url"].map(domain_of)
 
     out["score_gsc"] = (
         np.log1p(out["impressions"].fillna(0))
@@ -186,6 +216,47 @@ def parse_gsc(df_or_sheets):
     out = out.drop_duplicates(subset=["url"]).reset_index(drop=True)
     return out
 
+def parse_crawl(df):
+    """
+    Accetta export crawl tipo Screaming Frog:
+    - Address
+    - Title 1
+    - H1-1
+    - Meta Description 1
+    - Language (opzionale)
+    """
+    if df is None or df.empty:
+        return None
+
+    cols = {c.lower().strip(): c for c in df.columns}
+
+    def find_col(keys):
+        for k in keys:
+            for lc, orig in cols.items():
+                if k in lc:
+                    return orig
+        return None
+
+    c_url = find_col(["address", "url", "pagina"])
+    if not c_url:
+        return None
+
+    c_title = find_col(["title 1", "title"])
+    c_h1 = find_col(["h1-1", "h1"])
+    c_md = find_col(["meta description 1", "meta description", "description"])
+    c_lang = find_col(["language", "lingua"])
+
+    out = pd.DataFrame()
+    out["url"] = df[c_url].astype(str).str.strip()
+    out["title"] = df[c_title].fillna("").astype(str).map(safe_text) if c_title else ""
+    out["h1"] = df[c_h1].fillna("").astype(str).map(safe_text) if c_h1 else ""
+    out["meta"] = df[c_md].fillna("").astype(str).map(safe_text) if c_md else ""
+    out["lang"] = df[c_lang].fillna("").astype(str).str.lower().map(safe_text) if c_lang else ""
+
+    out = out[out["url"].str.startswith("http", na=False)]
+    out["domain"] = out["url"].map(domain_of)
+    out = out.drop_duplicates(subset=["url"]).reset_index(drop=True)
+    return out
 
 # =========================
 # EMBEDDINGS
@@ -198,7 +269,6 @@ def get_embeddings(texts, client: OpenAI):
     try:
         res = client.embeddings.create(input=clean, model=EMBED_MODEL)
         embs = [d.embedding for d in res.data]
-        # safety
         if len(embs) != len(clean):
             embs = (embs + [None] * len(clean))[:len(clean)]
         return embs
@@ -208,23 +278,30 @@ def get_embeddings(texts, client: OpenAI):
 
 def make_page_context(row):
     parts = []
-    if row.get("title"):
-        parts.append(f"Title: {row['title']}")
-    if row.get("h1"):
-        parts.append(f"H1: {row['h1']}")
-    if row.get("meta"):
-        parts.append(f"Description: {row['meta']}")
-    # fallback slug
-    toks = slug_tokens(row.get("url",""))
+    t = safe_text(row.get("title", ""))
+    h1 = safe_text(row.get("h1", ""))
+    md = safe_text(row.get("meta", ""))
+
+    if t:
+        parts.append(f"Title: {t}")
+    if h1:
+        parts.append(f"H1: {h1}")
+    if md:
+        parts.append(f"Description: {md}")
+
+    toks = slug_tokens(row.get("url", ""))
     if toks:
         parts.append("Slug: " + " ".join(toks[:12]))
-    return " | ".join(parts)[:2000] if parts else ("Slug: " + " ".join(slug_tokens(row.get("url",""))[:12]))[:2000]
+
+    s = " | ".join(parts).strip()
+    if not s:
+        s = "Slug: " + " ".join(slug_tokens(row.get("url", ""))[:12])
+    return s[:2000]
 
 # =========================
 # ARTICLE SEGMENTATION
 # =========================
 def detect_article_lang(text):
-    # euristica minima (solo per fallback): se molte lettere accentate -> it/fr/es; se molte parole inglesi -> en
     t = (text or "").lower()
     if len(t) < 200:
         return ""
@@ -240,12 +317,10 @@ def detect_article_lang(text):
 
 def split_blocks(text):
     """
-    Ritorna una lista di blocchi: {type: 'heading'|'para', text: str}
-    Preserva headings Markdown (#, ##, ###).
+    Ritorna blocchi: heading/para, preserva headings Markdown.
     """
     lines = (text or "").splitlines()
-    blocks = []
-    buf = []
+    blocks, buf = [], []
 
     def flush_para():
         nonlocal buf
@@ -266,31 +341,38 @@ def split_blocks(text):
     flush_para()
     return blocks
 
-def word_count(s):
+def wc(s):
     return len(re.findall(r"\w+", s or ""))
 
 # =========================
 # LINK INSERTION
 # =========================
 def choose_anchor(row, fallback="approfondisci"):
-    # preferisci title/h1 (più naturale), altrimenti slug
-    t = safe_text(row.get("title",""))
-    h1 = safe_text(row.get("h1",""))
+    t = safe_text(row.get("title", ""))
+    h1 = safe_text(row.get("h1", ""))
     if t:
         return t[:70]
     if h1:
         return h1[:70]
-    toks = slug_tokens(row.get("url",""))
+    toks = slug_tokens(row.get("url", ""))
     if toks:
         return " ".join(toks[:6])[:70]
     return fallback
 
 def insert_link_end_of_paragraph(paragraph, anchor, url):
-    # Inserisce alla fine del paragrafo in modo naturale e “safe”
     p = paragraph.rstrip()
     if p.endswith((".", "!", "?", "…")):
         return p + f" Approfondisci: [{anchor}]({url})."
     return p + f". Approfondisci: [{anchor}]({url})."
+
+def to_txt_download(text: str) -> bytes:
+    return (text or "").encode("utf-8")
+
+def to_excel_audit(df: pd.DataFrame) -> bytes:
+    out = BytesIO()
+    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="audit")
+    return out.getvalue()
 
 # =========================
 # RUN
@@ -306,31 +388,41 @@ if st.button("🚀 Genera internal link"):
         st.error("Inserisci OpenAI key.")
         st.stop()
 
+    # load
     df_gsc_raw = load_file(gsc_file)
     df_crawl_raw = load_file(crawl_file) if crawl_file else None
 
+    # parse
     gsc = parse_gsc(df_gsc_raw)
     if gsc is None or gsc.empty:
-        st.error("Non riesco a leggere il file GSC. Assicurati che contenga una colonna Page/Pagina con le URL.")
+        st.error("Non riesco a leggere il file GSC. Assicurati che contenga un foglio Pagine/Pages con una colonna Page/Pagina.")
         st.stop()
 
-    crawl = parse_crawl(df_crawl_raw) if df_crawl_raw is not None else None
+    crawl = parse_crawl(df_crawl_raw) if isinstance(df_crawl_raw, pd.DataFrame) else None
+    # se il crawl è multi-sheet (raro), prova a usare il primo foglio utile
+    if crawl is None and isinstance(df_crawl_raw, dict):
+        for sh, df in df_crawl_raw.items():
+            c = parse_crawl(df)
+            if c is not None and not c.empty:
+                crawl = c
+                break
 
-    # merge: base = GSC, arricchisci con crawl se disponibile
+    # merge: base = GSC
     pages = gsc.copy()
     if crawl is not None and not crawl.empty:
-        pages = pages.merge(
-            crawl[["url", "title", "h1", "meta", "lang"]],
-            on="url",
-            how="left"
-        )
+        pages = pages.merge(crawl[["url", "title", "h1", "meta", "lang"]], on="url", how="left")
     else:
         pages["title"] = ""
         pages["h1"] = ""
         pages["meta"] = ""
         pages["lang"] = ""
 
-    # determina lingua articolo
+    # info sheet used
+    used_sheet = gsc.attrs.get("gsc_sheet_used")
+    if used_sheet:
+        st.success(f"✅ GSC: foglio usato → {used_sheet}")
+
+    # lingua articolo
     lang_guess = detect_article_lang(article_text)
     lang_article = lang_guess
     if manual_lang != "auto":
@@ -338,7 +430,6 @@ if st.button("🚀 Genera internal link"):
     if not lang_article:
         lang_article = ""
 
-    # filtra lingua solo se disponibile nei dati crawl (es. it-IT, en, ecc.)
     if lang_article and pages["lang"].astype(str).str.len().sum() > 0:
         pages["_lang2"] = pages["lang"].astype(str).str[:2].str.lower()
         pages_lang = pages[pages["_lang2"] == lang_article].copy()
@@ -347,13 +438,15 @@ if st.button("🚀 Genera internal link"):
         else:
             pages = pages.drop(columns=["_lang2"], errors="ignore")
 
-    # ordina per priorità GSC e tieni un massimo ragionevole (performance + costi embeddings)
+    # limita per costo embeddings
     pages = pages.sort_values("score_gsc", ascending=False).head(1200).reset_index(drop=True)
 
-    # debug snapshot
     with st.expander("📌 Candidate URL snapshot (debug)", expanded=False):
         st.write(f"URL candidate: {len(pages)}")
-        st.dataframe(pages[["url", "clicks", "impressions", "position", "score_gsc"]].head(30), use_container_width=True)
+        st.dataframe(
+            pages[["url", "clicks", "impressions", "position", "score_gsc"]].head(30),
+            use_container_width=True
+        )
 
     # embeddings pages
     client = OpenAI(api_key=openai_api_key)
@@ -362,7 +455,7 @@ if st.button("🚀 Genera internal link"):
     st.info("🧠 Calcolo embeddings pagine interne…")
     emb_pages = []
     for i in range(0, len(pages), BATCH_SIZE):
-        batch = pages["ctx"].iloc[i:i+BATCH_SIZE].tolist()
+        batch = pages["ctx"].iloc[i:i + BATCH_SIZE].tolist()
         emb_pages.extend(get_embeddings(batch, client))
 
     ok_idx = [i for i, e in enumerate(emb_pages) if e is not None]
@@ -375,23 +468,23 @@ if st.button("🚀 Genera internal link"):
 
     # segment article
     blocks = split_blocks(article_text)
-    total_words = word_count(article_text)
+    total_words = wc(article_text)
     max_links_total = max(1, int(np.ceil(total_words / 1000 * links_per_1000_words)))
 
-    # choose candidate paragraphs (non headings, abbastanza lunghi)
-    para_indices = [i for i,b in enumerate(blocks) if b["type"]=="para" and word_count(b["text"]) >= 60]
+    # paragrafi candidati
+    para_indices = [i for i, b in enumerate(blocks) if b["type"] == "para" and wc(b["text"]) >= 60]
     if not para_indices:
         st.warning("Non ho trovato paragrafi abbastanza lunghi per inserire link in modo sensato.")
         st.stop()
 
-    # embeddings paragraphs
+    # embeddings paragrafi
     para_texts = [blocks[i]["text"][:2000] for i in para_indices]
     st.info("🧠 Calcolo embeddings paragrafi…")
     emb_paras = []
     for i in range(0, len(para_texts), BATCH_SIZE):
-        emb_paras.extend(get_embeddings(para_texts[i:i+BATCH_SIZE], client))
+        emb_paras.extend(get_embeddings(para_texts[i:i + BATCH_SIZE], client))
 
-    para_ok = [i for i,e in enumerate(emb_paras) if e is not None]
+    para_ok = [i for i, e in enumerate(emb_paras) if e is not None]
     if not para_ok:
         st.error("Embeddings paragrafi non disponibili.")
         st.stop()
@@ -399,51 +492,53 @@ if st.button("🚀 Genera internal link"):
     mat_paras = np.array([emb_paras[i] for i in para_ok])
     sims = cosine_similarity(mat_paras, mat_pages)
 
-    # greedy selection with rules
+    # greedy insertion
     used_urls = Counter()
     last_link_wordpos = -10**9
     inserted = []
     out_blocks = [b["text"] for b in blocks]
 
-    # compute word positions per block (for spacing)
+    # word position per block
     running = 0
     block_wordpos = []
     for b in blocks:
         block_wordpos.append(running)
-        running += word_count(b["text"])
+        running += wc(b["text"])
 
-    # helper: get best candidates for a paragraph row
-    def top_candidates(sim_row, k=8):
+    def top_candidates(sim_row, k=10):
         idxs = np.argsort(sim_row)[::-1][:k]
         return [(int(j), float(sim_row[j])) for j in idxs]
 
-    # iterate paragraphs by their order in article (keeps narrative)
     links_made = 0
-    for rank_i, para_local in enumerate(para_ok):
+    for local_para_idx in para_ok:
         if links_made >= max_links_total:
             break
 
-        block_i = para_indices[para_local]
+        block_i = para_indices[local_para_idx]
         para = blocks[block_i]["text"]
         current_wordpos = block_wordpos[block_i]
 
-        # spacing rule
+        # spacing
         if (current_wordpos - last_link_wordpos) < min_words_per_link:
             continue
 
-        cand = top_candidates(sims[rank_i], k=10)
+        # già link nel paragrafo?
+        existing_links = len(re.findall(r"\[[^\]]+\]\([^)]+\)", para))
+        if existing_links >= max_links_per_paragraph:
+            continue
+
+        sim_row = sims[para_ok.index(local_para_idx)]
+        cand = top_candidates(sim_row, k=12)
 
         chosen = None
         for j, score in cand:
             row = pages_ok.iloc[j].to_dict()
             url = row["url"]
 
-            # no repeat too much
             if used_urls[url] >= max_same_url:
                 continue
 
-            # avoid self-link if the article URL equals candidate? (not available here)
-            # confidence threshold: dynamic
+            # threshold prudente
             if score < 0.36:
                 continue
 
@@ -457,10 +552,8 @@ if st.button("🚀 Genera internal link"):
         anchor = choose_anchor(row)
         url = row["url"]
 
-        # apply insertion (safe): end of paragraph
-        updated = insert_link_end_of_paragraph(para, anchor, url)
+        out_blocks[block_i] = insert_link_end_of_paragraph(para, anchor, url)
 
-        out_blocks[block_i] = updated
         used_urls[url] += 1
         links_made += 1
         last_link_wordpos = current_wordpos
@@ -470,43 +563,53 @@ if st.button("🚀 Genera internal link"):
             "anchor": anchor,
             "url": url,
             "similarity": round(score, 4),
-            "word_pos": current_wordpos
+            "word_pos": current_wordpos,
+            "clicks": float(row.get("clicks", 0) or 0),
+            "impressions": float(row.get("impressions", 0) or 0),
+            "position": float(row.get("position", np.nan)) if row.get("position") is not None else np.nan
         })
 
-    # compose output text with original structure
-    # We lost blank lines; reconstruct with simple joining rules:
+    # rebuild article
     final_lines = []
     for i, b in enumerate(blocks):
         txt = out_blocks[i].strip()
         if not txt:
             continue
         final_lines.append(txt)
-        final_lines.append("")  # blank line between blocks
+        final_lines.append("")
     updated_article = "\n".join(final_lines).strip()
 
     st.markdown("## ✅ Risultato")
 
+    audit_df = pd.DataFrame(inserted).sort_values("word_pos") if inserted else pd.DataFrame(columns=["anchor","url","similarity","word_pos"])
+
     if mode.startswith("Assistita"):
-        # In assistita mostriamo solo proposte e non sovrascriviamo l'articolo
-        st.warning("Modalità assistita: qui sotto vedi le proposte. Se vuoi inserimento automatico, usa Safe.")
-        st.dataframe(pd.DataFrame(inserted), use_container_width=True)
+        st.warning("Modalità assistita: qui sotto vedi le proposte (audit). Per inserimento automatico usa Safe.")
+        st.dataframe(audit_df, use_container_width=True)
     else:
         st.markdown("### Articolo con link inseriti")
         st.text_area("Output (copia/incolla)", value=updated_article, height=360)
 
         st.markdown("### Audit link inseriti")
-        audit_df = pd.DataFrame(inserted).sort_values("word_pos")
         st.dataframe(audit_df, use_container_width=True)
 
-        # download
-        st.download_button(
-            "📥 Scarica output (txt)",
-            data=updated_article.encode("utf-8"),
-            file_name="article_with_internal_links.txt",
-            mime="text/plain"
-        )
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button(
+                "📥 Scarica output (txt)",
+                data=to_txt_download(updated_article),
+                file_name="article_with_internal_links.txt",
+                mime="text/plain"
+            )
+        with c2:
+            st.download_button(
+                "📥 Scarica audit (xlsx)",
+                data=to_excel_audit(audit_df),
+                file_name="internal_link_audit.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
-    # Debug competitor-like view for pages
-    with st.expander("🔎 Debug pagine candidate (top 20)", expanded=False):
-        debug = pages_ok[["url", "title", "h1", "meta", "clicks", "impressions", "position", "score_gsc"]].head(20)
-        st.dataframe(debug, use_container_width=True)
+    with st.expander("🔎 Debug pagine candidate (top 30)", expanded=False):
+        dbg_cols = ["url", "title", "h1", "meta", "lang", "clicks", "impressions", "position", "score_gsc"]
+        dbg_cols = [c for c in dbg_cols if c in pages_ok.columns]
+        st.dataframe(pages_ok[dbg_cols].head(30), use_container_width=True)
