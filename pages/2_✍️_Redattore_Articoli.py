@@ -205,7 +205,7 @@ Requisiti obbligatori:
 {outline_block}
 
 3) Per ogni H2:
-   - includi almeno: esempio concreto, checklist o mini-framework (3-7 bullet), e un “errore comune da evitare”.
+   - includi se necessario per l'articolo almeno: esempio concreto, checklist o mini-framework (3-7 bullet), e un “errore comune da evitare”.
    - se l'intento è informativo, mantieni tono pratico.
    - se l'intento è commerciale, inserisci criteri di scelta e segnali di ROI.
 
