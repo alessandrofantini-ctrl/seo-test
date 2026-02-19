@@ -13,7 +13,7 @@ import numpy as np
 # CONFIG
 # =========================
 st.set_page_config(page_title="B2B category brief (e-commerce materiale elettrico)", layout="wide")
-st.title("🧩 B2B category brief REXEL")
+st.title("🧩 B2B category brief (e-commerce materiale elettrico)")
 st.caption("Brief tecnici per copywriter: struttura categoria, criteri di scelta, parametri e filtri. Poco informativo, molto operativo.")
 
 # =========================
@@ -82,18 +82,161 @@ def clamp(s: str, n: int) -> str:
     s = safe_text(s)
     return s[:n] if len(s) > n else s
 
+def normalize_lines(text_area_value: str):
+    return [safe_text(x) for x in (text_area_value or "").splitlines() if safe_text(x)]
+
+def uniq_keep_order(items):
+    out = []
+    for x in items:
+        x = safe_text(x)
+        if x and x not in out:
+            out.append(x)
+    return out
+
+# =========================
+# REXEL FACETS (brands + filters) FROM CATEGORY URL
+# =========================
+def scrape_rexel_facets(category_url: str):
+    """
+    Estrae:
+    - brand (nomi) dal blocco id="collapseBrands" se presente, altrimenti euristica testuale
+    - nomi filtri (facet name) dalla sezione "Filtri" (euristica su testo)
+    Mostra anche raw_lines utili per debug.
+    """
+    out = {
+        "url": category_url,
+        "http_status": None,
+        "brands": [],
+        "filters": [],
+        "raw_lines_window": [],
+        "error": "",
+    }
+
+    try:
+        r = HTTP.get(category_url, headers=UA, timeout=18, allow_redirects=True)
+        out["http_status"] = r.status_code
+        if r.status_code >= 400 or not r.text:
+            out["error"] = f"HTTP {r.status_code}"
+            return out
+
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # 1) BRAND: prova dal div specifico (come da tua indicazione)
+        brands = []
+        brands_div = soup.find(id="collapseBrands")
+        if brands_div:
+            # spesso i brand sono <a> o <label> con testo tipo "SCHNEIDER ELECTRIC (1.967)"
+            for el in brands_div.find_all(["a", "label", "span"], limit=250):
+                t = safe_text(el.get_text(" ", strip=True))
+                if not t:
+                    continue
+                # pulisci conteggi
+                t = re.sub(r"\s*\(\s*[\d\.\,]+\s*\)\s*$", "", t).strip()
+                # evita stringhe troppo corte o generiche
+                if len(t) >= 2 and not t.lower().startswith("mostra"):
+                    brands.append(t)
+            brands = uniq_keep_order(brands)
+
+        # fallback brand: euristica sulla zona testo tra "Brand" e "Filtri"
+        if not brands:
+            txt = soup.get_text("\n", strip=True)
+            lines = [safe_text(x) for x in txt.split("\n") if safe_text(x)]
+            try:
+                i_brand = next(i for i, l in enumerate(lines) if l.lower() == "brand")
+                i_filtri = next(i for i, l in enumerate(lines) if l.lower() == "filtri")
+                window = lines[i_brand:i_filtri]
+                # trova righe con conteggio
+                for l in window:
+                    m = re.match(r"^(.+?)\s*\(\s*[\d\.\,]+\s*\)\s*$", l)
+                    if m:
+                        nm = m.group(1).strip()
+                        if len(nm) >= 2:
+                            brands.append(nm)
+                brands = uniq_keep_order(brands)
+            except Exception:
+                pass
+
+        # 2) FILTRI: euristica sul blocco testuale dopo "Filtri" e prima di "Trovati"
+        filters_found = []
+        txt = soup.get_text("\n", strip=True)
+        lines = [safe_text(x) for x in txt.split("\n") if safe_text(x)]
+
+        # prova a delimitare la finestra utile
+        start = None
+        end = None
+        for i, l in enumerate(lines):
+            if l.lower() == "filtri":
+                start = i
+                break
+        if start is not None:
+            for j in range(start, min(len(lines), start + 400)):
+                if "trovati" in lines[j].lower():
+                    end = j
+                    break
+        if start is None:
+            # se non troviamo "Filtri", niente
+            out["brands"] = brands
+            out["filters"] = []
+            return out
+
+        window = lines[start:(end if end else min(len(lines), start + 220))]
+
+        # salva una finestra ridotta per debug
+        out["raw_lines_window"] = window[:120]
+
+        # nella finestra ci sono sia nomi filtri che valori. Teniamo:
+        # - righe che non sono "Filtri", "Filtri attivi", ecc.
+        # - righe che NON sembrano un valore (es. "Normalmente disponibile") in base a stoplist
+        stop_values = {
+            "normalmente disponibile",
+            "ordinabile a fornitore",
+            "filtri attivi",
+            "mostra",
+            "ordina per",
+            "rilevanza",
+            "prezzo listino",
+            "risultati",
+            "filtra prodotti",
+            "categoria",
+        }
+
+        # pattern tipico: "nome filtro (1.886)"
+        for l in window:
+            ll = l.lower()
+            if ll in stop_values:
+                continue
+            if ll.startswith("agg."):
+                continue
+            # nomi filtri spesso NON hanno conteggio? su Rexel sì.
+            m = re.match(r"^(.+?)\s*\(\s*[\d\.\,]+\s*\)\s*$", l)
+            if m:
+                name = m.group(1).strip()
+                nlow = name.lower()
+                if nlow in stop_values:
+                    continue
+                # escludi righe molto “valore”
+                if nlow in {"schneider electric", "abb", "lovato", "eaton"}:
+                    continue
+                # evita valori troppo brevi
+                if len(name) < 6:
+                    continue
+                filters_found.append(name)
+
+        # de-dup e taglio
+        filters_found = uniq_keep_order(filters_found)[:40]
+
+        out["brands"] = brands[:60]
+        out["filters"] = filters_found
+        return out
+
+    except Exception as e:
+        out["error"] = str(e)
+        return out
+
 # =========================
 # SCRAPING competitor pages
 # =========================
 def scrape_page(url: str, max_text_chars=14000):
-    """
-    Estrae segnali utili per category copy:
-    - title, meta description
-    - h1/h2/h3
-    - bullet (li)
-    - estratto testo (p + li)
-    - word_count stimata (su estratto)
-    """
     data = {
         "url": url,
         "domain": domain_of(url),
@@ -119,7 +262,6 @@ def scrape_page(url: str, max_text_chars=14000):
         soup = BeautifulSoup(r.text, "html.parser")
         soup = remove_boilerplate(soup)
 
-        # meta
         if soup.title and soup.title.string:
             data["title"] = safe_text(soup.title.string)
         md = soup.find("meta", attrs={"name": "description"})
@@ -128,7 +270,6 @@ def scrape_page(url: str, max_text_chars=14000):
 
         main = detect_main_container(soup)
 
-        # headings
         for tag in main.find_all(["h1", "h2", "h3"])[:110]:
             txt = safe_text(tag.get_text(" ", strip=True))
             if not txt:
@@ -140,14 +281,12 @@ def scrape_page(url: str, max_text_chars=14000):
             elif tag.name == "h3" and len(data["h3"]) < 45:
                 data["h3"].append(txt)
 
-        # bullets (li)
         for li in main.find_all("li")[:160]:
             t = safe_text(li.get_text(" ", strip=True))
             if t and 18 <= len(t) <= 200:
                 data["bullets"].append(t)
         data["bullets"] = data["bullets"][:45]
 
-        # text sample (p + bullets)
         paragraphs = main.find_all("p")
         p_text = " ".join([safe_text(p.get_text(" ", strip=True)) for p in paragraphs])
         b_text = " ".join(data["bullets"])
@@ -191,7 +330,6 @@ def pick_competitor_urls_from_serp(serp_json, preferred_domains, max_urls=10, ex
 
     preferred = []
     others = []
-
     for res in serp_json.get("organic_results", [])[:25]:
         u = res.get("link")
         if not u:
@@ -199,13 +337,11 @@ def pick_competitor_urls_from_serp(serp_json, preferred_domains, max_urls=10, ex
         d = domain_of(u)
         if any(ex in d for ex in exclude_domains):
             continue
-
         if any(pd in d for pd in preferred_domains):
             preferred.append(u)
         else:
             others.append(u)
 
-    # prima preferiti, poi altri
     out = []
     for u in preferred + others:
         if u not in out:
@@ -290,6 +426,12 @@ with col1:
 with col2:
     primary_kw = st.text_input("Keyword principale", placeholder="contattori")
 
+st.markdown("### Auto-estrazione da URL categoria Rexel (opzionale)")
+rexel_category_url = st.text_input(
+    "URL categoria su rexel.it (serve per estrarre marche e filtri automaticamente)",
+    placeholder="https://rexel.it/categoria/…"
+)
+
 st.markdown("### Extra (opzionale)")
 col3, col4 = st.columns(2)
 with col3:
@@ -313,11 +455,10 @@ manual_competitor_urls = st.text_area(
 )
 
 # =========================
-# GENERATION
+# GENERATION HELPERS
 # =========================
 def build_word_target(avg_wc: int, margin_pct: int, fallback_range: str):
     if avg_wc and avg_wc > 200:
-        # target = media + margine, con range leggermente ampio
         lo = int(avg_wc * (1 + max(0, margin_pct - 10) / 100))
         hi = int(avg_wc * (1 + (margin_pct + 10) / 100))
         lo = max(350, lo)
@@ -326,7 +467,6 @@ def build_word_target(avg_wc: int, margin_pct: int, fallback_range: str):
     return 0, fallback_range
 
 def competitor_block_for_prompt(comps):
-    # riduci token, ma mantieni segnali tecnici (bullets + h2)
     out = []
     for c in comps:
         out.append({
@@ -340,9 +480,6 @@ def competitor_block_for_prompt(comps):
             "error": c.get("error", ""),
         })
     return out
-
-def normalize_lines(text_area_value: str):
-    return [safe_text(x) for x in (text_area_value or "").splitlines() if safe_text(x)]
 
 # =========================
 # RUN BUTTON
@@ -364,9 +501,40 @@ if st.button("🚀 Genera brief per categoria"):
     own_domain = domain_of(site_url) if exclude_own_domain else ""
     exclude_domains = [own_domain] if own_domain else []
 
+    # 1) AUTO-ESTRAZIONE REXEL (brands + filters)
+    rexel_debug = None
+    auto_brands = []
+    auto_filters = []
+    if rexel_category_url and "rexel.it" in domain_of(rexel_category_url):
+        status = st.status("🧲 Estrazione marche/filtri da Rexel…", expanded=True)
+        rexel_debug = scrape_rexel_facets(rexel_category_url)
+        auto_brands = rexel_debug.get("brands", []) or []
+        auto_filters = rexel_debug.get("filters", []) or []
+        status.update(label="Estrazione Rexel pronta", state="complete", expanded=False)
+
+        with st.expander("Debug Rexel (marche/filtri trovati)", expanded=True):
+            st.write(f"HTTP: {rexel_debug.get('http_status')} — URL: {rexel_debug.get('url')}")
+            if rexel_debug.get("error"):
+                st.error(rexel_debug["error"])
+            st.markdown("**Marche trovate**")
+            st.write(auto_brands if auto_brands else "Nessuna marca trovata")
+            st.markdown("**Filtri trovati**")
+            st.write(auto_filters if auto_filters else "Nessun filtro trovato")
+            st.markdown("**Finestra testo (debug)**")
+            st.code("\n".join((rexel_debug.get("raw_lines_window") or [])[:80]))
+
+    # 2) Merge: se l’utente non ha compilato marche/filtri, usiamo quelli auto
+    subcats = normalize_lines(known_subcats)
+
+    brands_manual = normalize_lines(known_brands)
+    filters_manual = normalize_lines(known_filters)
+
+    brands_final = brands_manual if brands_manual else auto_brands
+    filters_final = filters_manual if filters_manual else auto_filters
+
+    # 3) competitor URLs
     manual_urls = normalize_lines(manual_competitor_urls)
 
-    # SERP
     serp_json = None
     serp_snap = None
     serp_urls = []
@@ -387,7 +555,6 @@ if st.button("🚀 Genera brief per categoria"):
         ) if serp_json else []
         status.update(label="SERP pronta", state="complete", expanded=False)
 
-    # merge URLs: manual first, then serp
     competitor_urls = []
     for u in manual_urls + serp_urls:
         if u and u not in competitor_urls:
@@ -397,12 +564,11 @@ if st.button("🚀 Genera brief per categoria"):
         st.error("Nessun competitor URL disponibile: inserisci URL manuali o attiva SERP.")
         st.stop()
 
-    # show SERP debug
     if serp_snap:
         with st.expander("SERP snapshot (debug)", expanded=False):
             st.json(serp_snap, expanded=2)
 
-    # scrape competitors
+    # 4) scrape competitor
     status = st.status("🕷️ Lettura competitor (contenuti)…", expanded=True)
     results = []
     max_scrape = min(len(competitor_urls), 12)
@@ -419,9 +585,8 @@ if st.button("🚀 Genera brief per categoria"):
     prog.empty()
     status.update(label="Competitor letti", state="complete", expanded=False)
 
-    # competitor debug (contenuti)
+    # competitor debug
     with st.expander("Competitor snapshot (debug)", expanded=False):
-        # ordina: prima domini preferiti, poi per word_count
         def pref_rank(d):
             d = (d or "").lower()
             for i, pdm in enumerate(preferred_domains):
@@ -448,7 +613,7 @@ if st.button("🚀 Genera brief per categoria"):
                     "error": c.get("error", ""),
                 }, expanded=2)
 
-    # word count target
+    # 5) word count target
     wc_list = [r.get("word_count") for r in results if isinstance(r.get("word_count"), int) and r.get("word_count") and r.get("word_count") > 0]
     avg_wc = int(np.mean(wc_list)) if wc_list else 0
     avg_wc, target_range = build_word_target(avg_wc, margin_pct, fallback_range)
@@ -460,17 +625,12 @@ if st.button("🚀 Genera brief per categoria"):
         st.write("- Media competitor non disponibile (scraping limitato o pagine non leggibili).")
     st.write(f"- Target consigliato: **{target_range} parole**")
 
-    # prepare prompt inputs
-    subcats = normalize_lines(known_subcats)
-    brands = normalize_lines(known_brands)
-    filters = normalize_lines(known_filters)
-
+    # 6) build prompt block
     comp_block = competitor_block_for_prompt(results_sorted[:10])
 
-    # AI brief
     client = OpenAI(api_key=openai_api_key)
 
-    system_prompt = f"""
+    system_prompt = """
 Sei un senior SEO e-commerce B2B specializzato in materiale elettrico.
 Crei brief operativi per testi di categoria (category page) destinati a buyer tecnici.
 
@@ -494,8 +654,8 @@ Keyword principale: "{kw}"
 
 Contesto (se disponibile):
 - sotto-categorie note: {subcats if subcats else "non fornite"}
-- marche principali: {brands if brands else "non fornite"}
-- filtri reali catalogo: {filters if filters else "non forniti"}
+- marche principali (auto o manuali): {brands_final if brands_final else "non fornite"}
+- filtri catalogo (auto o manuali): {filters_final if filters_final else "non forniti"}
 
 SERP/competitor (segnali estratti, possono essere incompleti):
 - domini prioritari: {preferred_domains if preferred_domains else "non forniti"}
@@ -539,6 +699,7 @@ Lista 12–20 punti tecnici tipici della categoria.
 
 ## filtri consigliati per e-commerce
 Suggerisci 10–15 filtri/facet realistici per la categoria.
+Se sono stati forniti filtri reali, usali come base e completa solo dove serve.
 
 {"## microcopy utile\n- 6 micro-frasi per aiutare la selezione\n- 6 avvertenze/compatibilità\n" if include_microcopy else ""}
 
@@ -572,7 +733,6 @@ Non aggiungere altre sezioni.
         st.markdown("## ✅ Brief per copywriter")
         st.markdown(brief)
 
-        # download as txt
         st.download_button(
             "📥 Scarica brief (txt)",
             data=brief.encode("utf-8"),
