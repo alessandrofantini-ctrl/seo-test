@@ -1,4 +1,5 @@
 import streamlit as st
+import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
@@ -8,13 +9,14 @@ from requests.adapters import HTTPAdapter, Retry
 import re
 import json
 import numpy as np
+from io import BytesIO
 
 # =========================
 # CONFIG
 # =========================
-st.set_page_config(page_title="B2B category brief (e-commerce materiale elettrico)", layout="wide")
-st.title("🧩 B2B category brief (e-commerce materiale elettrico)")
-st.caption("Brief tecnici per copywriter: struttura categoria, criteri di scelta, parametri e filtri. Poco informativo, molto operativo.")
+st.set_page_config(page_title="B2B category brief (batch + Rexel facets)", layout="wide")
+st.title("🧩 B2B category brief (batch + Rexel facets)")
+st.caption("Output ridotto: H1, lunghezza consigliata, outline H2/H3, FAQ (solo domande). Supporta batch da Excel (URL + query).")
 
 # =========================
 # HTTP session with retry
@@ -43,9 +45,14 @@ UA = {
 # =========================
 # UTILS
 # =========================
-def safe_text(s: str) -> str:
-    if not s:
+def safe_text(s) -> str:
+    if s is None:
         return ""
+    try:
+        if pd.isna(s):
+            return ""
+    except Exception:
+        pass
     return re.sub(r"\s+", " ", str(s)).strip()
 
 def domain_of(url: str) -> str:
@@ -54,13 +61,135 @@ def domain_of(url: str) -> str:
     except Exception:
         return ""
 
+def uniq_keep_order(items):
+    out = []
+    for x in items:
+        x = safe_text(x)
+        if x and x not in out:
+            out.append(x)
+    return out
+
+def clamp(s: str, n: int) -> str:
+    s = safe_text(s)
+    return s[:n] if len(s) > n else s
+
+def word_count(text: str) -> int:
+    return len(re.findall(r"\w+", text or ""))
+
+def normalize_lines(text_area_value: str):
+    return [safe_text(x) for x in (text_area_value or "").splitlines() if safe_text(x)]
+
+def to_excel_bytes(df: pd.DataFrame, sheet_name="output") -> bytes:
+    bio = BytesIO()
+    with pd.ExcelWriter(bio, engine="xlsxwriter") as w:
+        df.to_excel(w, index=False, sheet_name=sheet_name)
+    return bio.getvalue()
+
+# =========================
+# REXEL FACETS (brands + filter names) from category URL
+# =========================
+def scrape_rexel_facets(category_url: str):
+    """
+    Estrae:
+    - brands dal div id="collapseBrands" (se presente)
+    - nomi filtri (euristica su righe con conteggio) nella finestra dopo 'Filtri'
+    Ritorna anche una finestra testo per debug.
+    """
+    out = {
+        "url": category_url,
+        "http_status": None,
+        "brands": [],
+        "filters": [],
+        "raw_lines_window": [],
+        "error": "",
+    }
+    try:
+        r = HTTP.get(category_url, headers=UA, timeout=18, allow_redirects=True)
+        out["http_status"] = r.status_code
+        if r.status_code >= 400 or not r.text:
+            out["error"] = f"HTTP {r.status_code}"
+            return out
+
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # BRANDS
+        brands = []
+        brands_div = soup.find(id="collapseBrands")
+        if brands_div:
+            for el in brands_div.find_all(["a", "label", "span"], limit=300):
+                t = safe_text(el.get_text(" ", strip=True))
+                if not t:
+                    continue
+                t = re.sub(r"\s*\(\s*[\d\.\,]+\s*\)\s*$", "", t).strip()
+                if len(t) >= 2 and not t.lower().startswith("mostra"):
+                    brands.append(t)
+            brands = uniq_keep_order(brands)
+
+        # FILTER NAMES (euristica)
+        txt = soup.get_text("\n", strip=True)
+        lines = [safe_text(x) for x in txt.split("\n") if safe_text(x)]
+
+        start = None
+        end = None
+        for i, l in enumerate(lines):
+            if l.lower() == "filtri":
+                start = i
+                break
+        if start is not None:
+            for j in range(start, min(len(lines), start + 500)):
+                if "trovati" in lines[j].lower():
+                    end = j
+                    break
+        if start is None:
+            out["brands"] = brands[:60]
+            out["filters"] = []
+            return out
+
+        window = lines[start:(end if end else min(len(lines), start + 260))]
+        out["raw_lines_window"] = window[:120]
+
+        filters_found = []
+        stop_values = {
+            "filtri", "filtri attivi", "mostra", "ordina per", "rilevanza",
+            "prezzo listino", "risultati", "filtra prodotti", "categoria",
+            "normalmente disponibile", "ordinabile a fornitore"
+        }
+
+        for l in window:
+            ll = l.lower()
+            if ll in stop_values:
+                continue
+            m = re.match(r"^(.+?)\s*\(\s*[\d\.\,]+\s*\)\s*$", l)
+            if not m:
+                continue
+            name = m.group(1).strip()
+            nlow = name.lower()
+            if nlow in stop_values:
+                continue
+            if len(name) < 6:
+                continue
+            # evita che brand finiscano tra i filtri (capita se layout cambia)
+            if any(nlow == b.lower() for b in brands[:30]):
+                continue
+            filters_found.append(name)
+
+        out["brands"] = brands[:60]
+        out["filters"] = uniq_keep_order(filters_found)[:40]
+        return out
+
+    except Exception as e:
+        out["error"] = str(e)
+        return out
+
+# =========================
+# COMPETITOR SCRAPING (for word-count + outline hints)
+# =========================
 def remove_boilerplate(soup: BeautifulSoup):
     for tag in soup(["script", "style", "noscript", "svg", "canvas", "iframe"]):
         tag.decompose()
     for selector in ["nav", "header", "footer", "aside", "form"]:
         for tag in soup.select(selector):
             tag.decompose()
-    # banner/popups frequenti
     for cls in ["cookie", "cookies", "cookie-banner", "newsletter", "modal", "popup"]:
         for tag in soup.select(f".{cls}"):
             tag.decompose()
@@ -75,173 +204,11 @@ def detect_main_container(soup: BeautifulSoup):
                 return el
     return soup.body if soup.body else soup
 
-def word_count(text: str) -> int:
-    return len(re.findall(r"\w+", text or ""))
-
-def clamp(s: str, n: int) -> str:
-    s = safe_text(s)
-    return s[:n] if len(s) > n else s
-
-def normalize_lines(text_area_value: str):
-    return [safe_text(x) for x in (text_area_value or "").splitlines() if safe_text(x)]
-
-def uniq_keep_order(items):
-    out = []
-    for x in items:
-        x = safe_text(x)
-        if x and x not in out:
-            out.append(x)
-    return out
-
-# =========================
-# REXEL FACETS (brands + filters) FROM CATEGORY URL
-# =========================
-def scrape_rexel_facets(category_url: str):
-    """
-    Estrae:
-    - brand (nomi) dal blocco id="collapseBrands" se presente, altrimenti euristica testuale
-    - nomi filtri (facet name) dalla sezione "Filtri" (euristica su testo)
-    Mostra anche raw_lines utili per debug.
-    """
-    out = {
-        "url": category_url,
-        "http_status": None,
-        "brands": [],
-        "filters": [],
-        "raw_lines_window": [],
-        "error": "",
-    }
-
-    try:
-        r = HTTP.get(category_url, headers=UA, timeout=18, allow_redirects=True)
-        out["http_status"] = r.status_code
-        if r.status_code >= 400 or not r.text:
-            out["error"] = f"HTTP {r.status_code}"
-            return out
-
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        # 1) BRAND: prova dal div specifico (come da tua indicazione)
-        brands = []
-        brands_div = soup.find(id="collapseBrands")
-        if brands_div:
-            # spesso i brand sono <a> o <label> con testo tipo "SCHNEIDER ELECTRIC (1.967)"
-            for el in brands_div.find_all(["a", "label", "span"], limit=250):
-                t = safe_text(el.get_text(" ", strip=True))
-                if not t:
-                    continue
-                # pulisci conteggi
-                t = re.sub(r"\s*\(\s*[\d\.\,]+\s*\)\s*$", "", t).strip()
-                # evita stringhe troppo corte o generiche
-                if len(t) >= 2 and not t.lower().startswith("mostra"):
-                    brands.append(t)
-            brands = uniq_keep_order(brands)
-
-        # fallback brand: euristica sulla zona testo tra "Brand" e "Filtri"
-        if not brands:
-            txt = soup.get_text("\n", strip=True)
-            lines = [safe_text(x) for x in txt.split("\n") if safe_text(x)]
-            try:
-                i_brand = next(i for i, l in enumerate(lines) if l.lower() == "brand")
-                i_filtri = next(i for i, l in enumerate(lines) if l.lower() == "filtri")
-                window = lines[i_brand:i_filtri]
-                # trova righe con conteggio
-                for l in window:
-                    m = re.match(r"^(.+?)\s*\(\s*[\d\.\,]+\s*\)\s*$", l)
-                    if m:
-                        nm = m.group(1).strip()
-                        if len(nm) >= 2:
-                            brands.append(nm)
-                brands = uniq_keep_order(brands)
-            except Exception:
-                pass
-
-        # 2) FILTRI: euristica sul blocco testuale dopo "Filtri" e prima di "Trovati"
-        filters_found = []
-        txt = soup.get_text("\n", strip=True)
-        lines = [safe_text(x) for x in txt.split("\n") if safe_text(x)]
-
-        # prova a delimitare la finestra utile
-        start = None
-        end = None
-        for i, l in enumerate(lines):
-            if l.lower() == "filtri":
-                start = i
-                break
-        if start is not None:
-            for j in range(start, min(len(lines), start + 400)):
-                if "trovati" in lines[j].lower():
-                    end = j
-                    break
-        if start is None:
-            # se non troviamo "Filtri", niente
-            out["brands"] = brands
-            out["filters"] = []
-            return out
-
-        window = lines[start:(end if end else min(len(lines), start + 220))]
-
-        # salva una finestra ridotta per debug
-        out["raw_lines_window"] = window[:120]
-
-        # nella finestra ci sono sia nomi filtri che valori. Teniamo:
-        # - righe che non sono "Filtri", "Filtri attivi", ecc.
-        # - righe che NON sembrano un valore (es. "Normalmente disponibile") in base a stoplist
-        stop_values = {
-            "normalmente disponibile",
-            "ordinabile a fornitore",
-            "filtri attivi",
-            "mostra",
-            "ordina per",
-            "rilevanza",
-            "prezzo listino",
-            "risultati",
-            "filtra prodotti",
-            "categoria",
-        }
-
-        # pattern tipico: "nome filtro (1.886)"
-        for l in window:
-            ll = l.lower()
-            if ll in stop_values:
-                continue
-            if ll.startswith("agg."):
-                continue
-            # nomi filtri spesso NON hanno conteggio? su Rexel sì.
-            m = re.match(r"^(.+?)\s*\(\s*[\d\.\,]+\s*\)\s*$", l)
-            if m:
-                name = m.group(1).strip()
-                nlow = name.lower()
-                if nlow in stop_values:
-                    continue
-                # escludi righe molto “valore”
-                if nlow in {"schneider electric", "abb", "lovato", "eaton"}:
-                    continue
-                # evita valori troppo brevi
-                if len(name) < 6:
-                    continue
-                filters_found.append(name)
-
-        # de-dup e taglio
-        filters_found = uniq_keep_order(filters_found)[:40]
-
-        out["brands"] = brands[:60]
-        out["filters"] = filters_found
-        return out
-
-    except Exception as e:
-        out["error"] = str(e)
-        return out
-
-# =========================
-# SCRAPING competitor pages
-# =========================
-def scrape_page(url: str, max_text_chars=14000):
+def scrape_competitor_page(url: str, max_text_chars=14000):
     data = {
         "url": url,
         "domain": domain_of(url),
         "title": "",
-        "meta_description": "",
         "h1": "",
         "h2": [],
         "h3": [],
@@ -251,7 +218,6 @@ def scrape_page(url: str, max_text_chars=14000):
         "http_status": None,
         "error": "",
     }
-
     try:
         r = HTTP.get(url, headers=UA, timeout=18, allow_redirects=True)
         data["http_status"] = r.status_code
@@ -261,12 +227,8 @@ def scrape_page(url: str, max_text_chars=14000):
 
         soup = BeautifulSoup(r.text, "html.parser")
         soup = remove_boilerplate(soup)
-
         if soup.title and soup.title.string:
             data["title"] = safe_text(soup.title.string)
-        md = soup.find("meta", attrs={"name": "description"})
-        if md and md.get("content"):
-            data["meta_description"] = safe_text(md.get("content"))
 
         main = detect_main_container(soup)
 
@@ -297,13 +259,36 @@ def scrape_page(url: str, max_text_chars=14000):
         data["word_count"] = word_count(text)
 
         return data
-
     except Exception as e:
         data["error"] = str(e)
         return data
 
+def competitor_block_for_prompt(comps):
+    out = []
+    for c in comps:
+        out.append({
+            "url": c.get("url"),
+            "domain": c.get("domain"),
+            "h1": clamp(c.get("h1"), 120),
+            "h2": [clamp(x, 110) for x in (c.get("h2") or [])[:10]],
+            "bullets": [clamp(x, 160) for x in (c.get("bullets") or [])[:14]],
+            "word_count": c.get("word_count", 0),
+            "text_sample": clamp(c.get("text_sample"), 900),
+            "error": c.get("error", ""),
+        })
+    return out
+
+def build_word_target(avg_wc: int, margin_pct: int, fallback_range: str):
+    if avg_wc and avg_wc > 200:
+        lo = int(avg_wc * (1 + max(0, margin_pct - 10) / 100))
+        hi = int(avg_wc * (1 + (margin_pct + 10) / 100))
+        lo = max(300, lo)
+        hi = max(lo + 150, hi)
+        return avg_wc, f"{lo}–{hi}"
+    return 0, fallback_range
+
 # =========================
-# SERP via SerpApi (optional)
+# SERP (optional) via SerpApi
 # =========================
 @st.cache_data(show_spinner=False, ttl=60 * 60)
 def serpapi_search(query: str, api_key: str, gl="it", hl="it", domain="google.it"):
@@ -327,9 +312,7 @@ def pick_competitor_urls_from_serp(serp_json, preferred_domains, max_urls=10, ex
     if not serp_json:
         return []
     exclude_domains = exclude_domains or []
-
-    preferred = []
-    others = []
+    preferred, others = [], []
     for res in serp_json.get("organic_results", [])[:25]:
         u = res.get("link")
         if not u:
@@ -379,16 +362,15 @@ with st.sidebar:
         openai_api_key = st.secrets["OPENAI_API_KEY"]
 
     st.markdown("---")
-    st.subheader("SERP (opzionale ma consigliato)")
+    st.subheader("SERP (opzionale)")
     use_serp = st.toggle("Usa SerpApi per trovare competitor in SERP", value=True)
     serp_api_key = st.text_input("SerpApi key", type="password") if use_serp else ""
-    serp_max_urls = st.slider("Numero risultati SERP da considerare", 3, 15, 10)
+    serp_max_urls = st.slider("Competitor dalla SERP", 3, 15, 10)
 
     st.markdown("---")
     st.subheader("Competitor da privilegiare")
-    st.caption("Uno per riga: domini che vuoi prioritari in SERP (es. rs-online.com).")
     preferred_domains_text = st.text_area(
-        "Domini prioritari",
+        "Domini prioritari (uno per riga)",
         value="\n".join([
             "rs-online.com",
             "sacchi.it",
@@ -397,119 +379,218 @@ with st.sidebar:
             "emmstore.it",
             "comet.it",
         ]),
-        height=130
+        height=120
     )
 
     st.markdown("---")
-    st.subheader("Word count target")
+    st.subheader("Lunghezza")
     margin_pct = st.slider("Margine su media competitor (%)", 0, 60, 20, step=5)
     fallback_range = st.selectbox("Range default se non ho competitor utili", ["450–750", "550–900", "700–1100"], index=1)
 
     st.markdown("---")
-    st.subheader("Stile output")
-    tone = st.selectbox("Tono", ["Tecnico B2B (consigliato)", "Tecnico + commerciale", "Catalogo sintetico"], index=0)
+    st.subheader("Struttura")
     max_h2 = st.slider("Massimo H2", 4, 10, 8)
-    include_microcopy = st.toggle("Includi microcopy + avvertenze", value=True)
 
     st.markdown("---")
     st.subheader("Brand")
-    brand_name = st.text_input("Nome azienda/brand", value="Rexel")
+    brand_name = st.text_input("Nome brand", value="Rexel")
     site_url = st.text_input("Sito", value="https://rexel.it/")
-    exclude_own_domain = st.toggle("Escludi il dominio del brand dalla SERP", value=True)
+    exclude_own_domain = st.toggle("Escludi dominio brand dalla SERP", value=True)
 
 # =========================
-# MAIN INPUTS
+# INPUT: SINGLE OR BATCH
 # =========================
-col1, col2 = st.columns([2, 1])
-with col1:
-    category_name = st.text_input("Nome categoria (es. Contattori)", placeholder="Contattori")
-with col2:
-    primary_kw = st.text_input("Keyword principale", placeholder="contattori")
+tab1, tab2 = st.tabs(["Singola categoria", "Batch da Excel"])
 
-st.markdown("### Auto-estrazione da URL categoria Rexel (opzionale)")
-rexel_category_url = st.text_input(
-    "URL categoria su rexel.it (serve per estrarre marche e filtri automaticamente)",
-    placeholder="https://rexel.it/categoria/…"
-)
+with tab1:
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        page_url = st.text_input(
+            "URL categoria (opzionale, utile su rexel.it per estrarre marche/filtri)",
+            placeholder="https://rexel.it/categoria/…"
+        )
+    with col2:
+        query = st.text_input("Query obiettivo", placeholder="contattori e teleruttori")
 
-st.markdown("### Extra (opzionale)")
-col3, col4 = st.columns(2)
-with col3:
-    known_subcats = st.text_area("Sotto-categorie note (una per riga)", height=120, placeholder="Es.\nContattori modulari\nContattori tripolari\nContatti ausiliari")
-with col4:
-    known_brands = st.text_area("Marche principali (una per riga)", height=120, placeholder="Es.\nSchneider Electric\nSiemens\nABB")
+    st.markdown("### URL competitor (opzionale)")
+    manual_competitor_urls = st.text_area("Uno per riga (anche vuoto)", height=110, placeholder="Incolla URL competitor…")
 
-known_filters = st.text_area(
-    "Filtri reali del catalogo (opzionale, uno per riga)",
-    height=90,
-    placeholder="Es.\nNumero poli\nTensione bobina\nPotenza nominale\nMontaggio"
-)
+    run_single = st.button("🚀 Genera output (singolo)")
 
-st.markdown("---")
-st.markdown("### URL competitor (opzionale)")
-st.caption("Se li inserisci, il tool li userà sempre. Se non li inserisci, può recuperarli dalla SERP (se attivo).")
-manual_competitor_urls = st.text_area(
-    "Uno per riga (anche vuoto)",
-    height=110,
-    placeholder="Incolla qui URL di pagine categoria competitor"
-)
+with tab2:
+    st.markdown("Carica un Excel con **due colonne**: una per le **URL** e una per le **query**.")
+    batch_file = st.file_uploader("Excel (xlsx)", type=["xlsx"])
+    st.caption("Le colonne possono chiamarsi anche diversamente: il tool prova ad auto-rilevarle (url/address/pagina, query/keyword).")
+    st.markdown("### URL competitor (opzionale, usate per tutte le righe)")
+    batch_manual_competitor_urls = st.text_area("Competitor globali (uno per riga)", height=110, placeholder="Incolla URL competitor…")
+    run_batch = st.button("🚀 Genera output (batch)")
 
 # =========================
-# GENERATION HELPERS
+# CORE: build prompt + call AI
 # =========================
-def build_word_target(avg_wc: int, margin_pct: int, fallback_range: str):
-    if avg_wc and avg_wc > 200:
-        lo = int(avg_wc * (1 + max(0, margin_pct - 10) / 100))
-        hi = int(avg_wc * (1 + (margin_pct + 10) / 100))
-        lo = max(350, lo)
-        hi = max(lo + 150, hi)
-        return avg_wc, f"{lo}–{hi}"
-    return 0, fallback_range
+def build_prompts_for_row(
+    brand_name: str,
+    site_url: str,
+    page_url: str,
+    query: str,
+    max_h2: int,
+    avg_wc: int,
+    target_range: str,
+    brands_final: list,
+    filters_final: list,
+    competitor_block: list
+):
+    system_prompt = """
+Sei un senior SEO e-commerce B2B specializzato in materiale elettrico.
+Crei spunti operativi per testi di categoria (category page) destinati a buyer tecnici.
 
-def competitor_block_for_prompt(comps):
-    out = []
-    for c in comps:
-        out.append({
-            "url": c.get("url"),
-            "domain": c.get("domain"),
-            "h1": clamp(c.get("h1"), 140),
-            "h2": [clamp(x, 120) for x in (c.get("h2") or [])[:12]],
-            "bullets": [clamp(x, 160) for x in (c.get("bullets") or [])[:18]],
-            "word_count": c.get("word_count", 0),
-            "text_sample": clamp(c.get("text_sample"), 1200),
-            "error": c.get("error", ""),
-        })
-    return out
+Regole editoriali:
+- Output in italiano.
+- Stile tecnico e concreto, niente fuffa.
+- Maiuscole: sentence case (solo prima lettera maiuscola), evita title case.
+- Niente numeri inventati e niente claim non verificabili.
+- Poco informativo: evita sezioni lunghe "cos'è".
+"""
+
+    user_prompt = f"""
+Brand: {brand_name}
+Sito: {site_url}
+URL pagina (se disponibile): {page_url if page_url else "non fornita"}
+Query obiettivo: "{query}"
+
+Dati pagina (se disponibili, estratti automaticamente da Rexel):
+- marche principali: {brands_final if brands_final else "non disponibili"}
+- filtri (nomi facet): {filters_final if filters_final else "non disponibili"}
+
+Dati competitor (se disponibili):
+- media parole competitor stimata: {avg_wc if avg_wc else "non disponibile"}
+- lunghezza consigliata: {target_range}
+- estratti competitor (json): {json.dumps(competitor_block, ensure_ascii=False)}
+
+VINCOLI OUTPUT:
+- Voglio solo le sezioni richieste sotto, niente meta title/description.
+- H1: deve corrispondere alla query obiettivo. Usa la query come base e rendila in sentence case senza cambiare il significato.
+- Lunghezza consigliata: mostra solo il range, senza motivazione.
+- Outline: formato H2/H3 con Nota (IT) come guida pratica.
+- FAQ: solo domande, senza risposte.
+
+FORMATO OBBLIGATORIO:
+
+## h1
+- (una sola riga)
+
+## lunghezza consigliata
+- {target_range}
+
+## outline (H2/H3)
+Massimo {max_h2} H2.
+Per ogni H2: 2–4 H3 + una Nota (IT) su cosa scrivere (criteri scelta, compatibilità, differenze tra varianti, errori comuni).
+Se sono presenti filtri reali, usali per orientare l’outline.
+
+## faq (solo domande)
+5–8 domande che un buyer tecnico farebbe.
+Niente risposte.
+"""
+    return system_prompt, user_prompt
+
+def call_openai_brief(openai_api_key: str, system_prompt: str, user_prompt: str):
+    client = OpenAI(api_key=openai_api_key)
+    resp = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.35
+    )
+    return resp.choices[0].message.content
+
+def parse_output_sections(text: str):
+    """
+    Estrae sezioni in modo best-effort per esportare in Excel.
+    """
+    t = text or ""
+    def grab(section_name):
+        m = re.search(rf"^##\s+{re.escape(section_name)}\s*$([\s\S]*?)(?=^##\s+|\Z)", t, flags=re.M)
+        return safe_text(m.group(1)) if m else ""
+
+    h1 = grab("h1")
+    length = grab("lunghezza consigliata")
+    outline = grab("outline (H2/H3)")
+    faq = grab("faq (solo domande)")
+
+    # pulizia rapida (togli bullet leader "- " se presente)
+    h1 = re.sub(r"^\-\s*", "", h1).strip()
+    length = re.sub(r"^\-\s*", "", length).strip()
+
+    return h1, length, outline, faq
 
 # =========================
-# RUN BUTTON
+# SHARED: competitor collection
 # =========================
-if st.button("🚀 Genera brief per categoria"):
+def build_competitor_data(query: str, manual_urls: list, preferred_domains: list, own_domain: str):
+    serp_snap = None
+    urls = manual_urls[:]
+
+    if use_serp:
+        if not serp_api_key:
+            return urls, None, []  # handled upstream
+        serp_json = serpapi_search(query, serp_api_key, gl="it", hl="it", domain="google.it")
+        serp_snap = serp_snapshot_compact(serp_json, max_items=10) if serp_json else None
+        serp_urls = pick_competitor_urls_from_serp(
+            serp_json,
+            preferred_domains=preferred_domains,
+            max_urls=serp_max_urls,
+            exclude_domains=[own_domain] if own_domain else []
+        ) if serp_json else []
+        for u in serp_urls:
+            if u not in urls:
+                urls.append(u)
+
+    # scrape (max 12)
+    urls_to_scrape = urls[:12]
+    results = []
+    if urls_to_scrape:
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            futs = [ex.submit(scrape_competitor_page, u) for u in urls_to_scrape]
+            for f in as_completed(futs):
+                results.append(f.result())
+
+    # sort by preferred domain then wc
+    def pref_rank(d):
+        d = (d or "").lower()
+        for i, pdm in enumerate(preferred_domains):
+            if pdm in d:
+                return 0, i
+        return 1, 999
+
+    results_sorted = sorted(results, key=lambda x: (pref_rank(x.get("domain")), -(x.get("word_count") or 0)))
+    return urls, serp_snap, results_sorted
+
+# =========================
+# RUN: SINGLE
+# =========================
+def run_for_one(page_url: str, query: str, competitor_urls_text: str):
     if not openai_api_key:
         st.error("Inserisci OpenAI key.")
-        st.stop()
+        return
 
-    if not (primary_kw or category_name):
-        st.error("Inserisci almeno nome categoria o keyword principale.")
-        st.stop()
-
-    # inputs
-    cat = safe_text(category_name) or safe_text(primary_kw)
-    kw = safe_text(primary_kw) or safe_text(category_name)
+    q = safe_text(query)
+    if not q:
+        st.error("Inserisci la query obiettivo.")
+        return
 
     preferred_domains = normalize_lines(preferred_domains_text)
     own_domain = domain_of(site_url) if exclude_own_domain else ""
-    exclude_domains = [own_domain] if own_domain else []
 
-    # 1) AUTO-ESTRAZIONE REXEL (brands + filters)
+    # Rexel facets
     rexel_debug = None
-    auto_brands = []
-    auto_filters = []
-    if rexel_category_url and "rexel.it" in domain_of(rexel_category_url):
+    brands_final, filters_final = [], []
+    if page_url and "rexel.it" in domain_of(page_url):
         status = st.status("🧲 Estrazione marche/filtri da Rexel…", expanded=True)
-        rexel_debug = scrape_rexel_facets(rexel_category_url)
-        auto_brands = rexel_debug.get("brands", []) or []
-        auto_filters = rexel_debug.get("filters", []) or []
+        rexel_debug = scrape_rexel_facets(page_url)
+        brands_final = rexel_debug.get("brands", []) or []
+        filters_final = rexel_debug.get("filters", []) or []
         status.update(label="Estrazione Rexel pronta", state="complete", expanded=False)
 
         with st.expander("Debug Rexel (marche/filtri trovati)", expanded=True):
@@ -517,229 +598,231 @@ if st.button("🚀 Genera brief per categoria"):
             if rexel_debug.get("error"):
                 st.error(rexel_debug["error"])
             st.markdown("**Marche trovate**")
-            st.write(auto_brands if auto_brands else "Nessuna marca trovata")
+            st.write(brands_final if brands_final else "Nessuna marca trovata")
             st.markdown("**Filtri trovati**")
-            st.write(auto_filters if auto_filters else "Nessun filtro trovato")
+            st.write(filters_final if filters_final else "Nessun filtro trovato")
             st.markdown("**Finestra testo (debug)**")
             st.code("\n".join((rexel_debug.get("raw_lines_window") or [])[:80]))
 
-    # 2) Merge: se l’utente non ha compilato marche/filtri, usiamo quelli auto
-    subcats = normalize_lines(known_subcats)
-
-    brands_manual = normalize_lines(known_brands)
-    filters_manual = normalize_lines(known_filters)
-
-    brands_final = brands_manual if brands_manual else auto_brands
-    filters_final = filters_manual if filters_manual else auto_filters
-
-    # 3) competitor URLs
-    manual_urls = normalize_lines(manual_competitor_urls)
-
-    serp_json = None
-    serp_snap = None
-    serp_urls = []
-
-    if use_serp:
-        if not serp_api_key:
-            st.error("SerpApi attiva: inserisci SerpApi key.")
-            st.stop()
-
-        status = st.status("🔍 Analisi SERP…", expanded=True)
-        serp_json = serpapi_search(kw, serp_api_key, gl="it", hl="it", domain="google.it")
-        serp_snap = serp_snapshot_compact(serp_json, max_items=10) if serp_json else None
-        serp_urls = pick_competitor_urls_from_serp(
-            serp_json,
-            preferred_domains=preferred_domains,
-            max_urls=serp_max_urls,
-            exclude_domains=exclude_domains
-        ) if serp_json else []
-        status.update(label="SERP pronta", state="complete", expanded=False)
-
-    competitor_urls = []
-    for u in manual_urls + serp_urls:
-        if u and u not in competitor_urls:
-            competitor_urls.append(u)
-
-    if not competitor_urls:
-        st.error("Nessun competitor URL disponibile: inserisci URL manuali o attiva SERP.")
-        st.stop()
+    # competitor data
+    manual_urls = normalize_lines(competitor_urls_text)
+    status = st.status("🕷️ Lettura competitor…", expanded=True)
+    all_urls, serp_snap, comp_results = build_competitor_data(q, manual_urls, preferred_domains, own_domain)
+    status.update(label="Competitor pronti", state="complete", expanded=False)
 
     if serp_snap:
         with st.expander("SERP snapshot (debug)", expanded=False):
             st.json(serp_snap, expanded=2)
 
-    # 4) scrape competitor
-    status = st.status("🕷️ Lettura competitor (contenuti)…", expanded=True)
-    results = []
-    max_scrape = min(len(competitor_urls), 12)
-    urls_to_scrape = competitor_urls[:max_scrape]
-
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        futs = [ex.submit(scrape_page, u) for u in urls_to_scrape]
-        prog = status.progress(0.0)
-        done = 0
-        for f in as_completed(futs):
-            done += 1
-            prog.progress(done / max(1, len(futs)))
-            results.append(f.result())
-    prog.empty()
-    status.update(label="Competitor letti", state="complete", expanded=False)
-
-    # competitor debug
     with st.expander("Competitor snapshot (debug)", expanded=False):
-        def pref_rank(d):
-            d = (d or "").lower()
-            for i, pdm in enumerate(preferred_domains):
-                if pdm in d:
-                    return 0, i
-            return 1, 999
-
-        results_sorted = sorted(results, key=lambda x: (pref_rank(x.get("domain")), -(x.get("word_count") or 0)))
-        for c in results_sorted:
+        for c in comp_results:
             label = f"{c.get('domain','')} — {clamp(c.get('h1') or c.get('title') or c.get('url'), 80)}"
             with st.expander(label, expanded=False):
                 st.json({
                     "url": c.get("url"),
                     "domain": c.get("domain"),
                     "http_status": c.get("http_status"),
-                    "title": c.get("title"),
-                    "meta_description": c.get("meta_description"),
                     "h1": c.get("h1"),
-                    "h2": c.get("h2", [])[:20],
-                    "h3": c.get("h3", [])[:20],
-                    "bullets": c.get("bullets", [])[:25],
+                    "h2": c.get("h2", [])[:18],
+                    "bullets": c.get("bullets", [])[:20],
                     "word_count": c.get("word_count"),
                     "text_sample": c.get("text_sample", ""),
                     "error": c.get("error", ""),
                 }, expanded=2)
 
-    # 5) word count target
-    wc_list = [r.get("word_count") for r in results if isinstance(r.get("word_count"), int) and r.get("word_count") and r.get("word_count") > 0]
+    wc_list = [r.get("word_count") for r in comp_results if isinstance(r.get("word_count"), int) and r.get("word_count") and r.get("word_count") > 0]
     avg_wc = int(np.mean(wc_list)) if wc_list else 0
     avg_wc, target_range = build_word_target(avg_wc, margin_pct, fallback_range)
 
     st.markdown("### 📏 Lunghezza consigliata")
-    if avg_wc:
-        st.write(f"- Media competitor (stimata): **{avg_wc} parole**")
-    else:
-        st.write("- Media competitor non disponibile (scraping limitato o pagine non leggibili).")
-    st.write(f"- Target consigliato: **{target_range} parole**")
+    st.write(f"**{target_range} parole**")
 
-    # 6) build prompt block
-    comp_block = competitor_block_for_prompt(results_sorted[:10])
+    comp_block = competitor_block_for_prompt(comp_results[:10])
+    system_prompt, user_prompt = build_prompts_for_row(
+        brand_name=brand_name,
+        site_url=site_url,
+        page_url=page_url,
+        query=q,
+        max_h2=max_h2,
+        avg_wc=avg_wc,
+        target_range=target_range,
+        brands_final=brands_final,
+        filters_final=filters_final,
+        competitor_block=comp_block
+    )
 
-    client = OpenAI(api_key=openai_api_key)
-
-    system_prompt = """
-Sei un senior SEO e-commerce B2B specializzato in materiale elettrico.
-Crei brief operativi per testi di categoria (category page) destinati a buyer tecnici.
-
-Obiettivo:
-- contenuto utile alla scelta e all'acquisto (specifiche, compatibilità, criteri, filtri)
-- poco informativo, niente storia/definizioni scolastiche
-
-Regole editoriali:
-- frasi brevi, lessico tecnico, orientato ai filtri
-- maiuscole: sentence case (solo prima lettera maiuscola), evita title case
-- niente numeri inventati e niente claim non verificabili
-- evita fuffa e ripetizioni
-- output in italiano
-"""
-
-    user_prompt = f"""
-Brand: {brand_name}
-Sito: {site_url}
-Categoria: "{cat}"
-Keyword principale: "{kw}"
-
-Contesto (se disponibile):
-- sotto-categorie note: {subcats if subcats else "non fornite"}
-- marche principali (auto o manuali): {brands_final if brands_final else "non fornite"}
-- filtri catalogo (auto o manuali): {filters_final if filters_final else "non forniti"}
-
-SERP/competitor (segnali estratti, possono essere incompleti):
-- domini prioritari: {preferred_domains if preferred_domains else "non forniti"}
-- media parole competitor stimata: {avg_wc if avg_wc else "non disponibile"}
-- target parole consigliato: {target_range}
-- estratti competitor (json): {json.dumps(comp_block, ensure_ascii=False)}
-
-Vincoli:
-- Non scrivere un articolo informativo: evita sezioni lunghe "cos'è".
-- Struttura da category page B2B: breve intro, guida alla scelta, varianti, compatibilità, accessori, note pratiche.
-- Inserisci solo parametri tecnici plausibili per la categoria (non inventare specifiche strane).
-- Niente title case.
-
-Output richiesto (formato obbligatorio):
-
-## meta
-- meta title (3 varianti, <= 60 caratteri):
-  - una variante con pattern: "{kw} | {brand_name}"
-  - due varianti tecniche orientate a selezione/assortimento (no slogan)
-- meta description (3 varianti, <= 155 caratteri):
-  - orientate a specifiche, assortimento, filtri, uso B2B
-  - niente promesse vaghe
-
-## h1
-- 1 proposta (sentence case)
-
-## lunghezza consigliata
-- se la media competitor è disponibile: conferma target = media + 15–25%
-- se non disponibile: conferma target = {fallback_range}
-- motivazione: 2 righe pratiche (solo utilità e-commerce)
-
-## outline (H2/H3)
-Massimo {max_h2} H2.
-Per ogni H2:
-- 2–4 H3
-- una Nota (IT) pratica su cosa scrivere con focus su: criteri di scelta, compatibilità/installazione, differenze tra varianti, errori comuni.
-Evita H2 generici tipo "cos'è" (se serve, massimo 3 righe in intro).
-
-## parametri tecnici da coprire (checklist)
-Lista 12–20 punti tecnici tipici della categoria.
-
-## filtri consigliati per e-commerce
-Suggerisci 10–15 filtri/facet realistici per la categoria.
-Se sono stati forniti filtri reali, usali come base e completa solo dove serve.
-
-{"## microcopy utile\n- 6 micro-frasi per aiutare la selezione\n- 6 avvertenze/compatibilità\n" if include_microcopy else ""}
-
-## faq tecniche (5)
-Domande che un buyer B2B fa davvero. Risposte 1–2 frasi, pratiche.
-
-## note per copywriter
-5 regole pratiche per scrivere la categoria:
-- tono
-- lunghezza paragrafi
-- uso bullet
-- densità keyword naturale (senza ripetizioni)
-- parole/claim da evitare
-
-Non aggiungere altre sezioni.
-"""
-
-    status = st.status("🧠 Generazione brief…", expanded=True)
+    status = st.status("🧠 Generazione output…", expanded=True)
     try:
-        resp = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.35
-        )
-        brief = resp.choices[0].message.content
-        status.update(label="Brief pronto", state="complete", expanded=False)
-
-        st.markdown("## ✅ Brief per copywriter")
-        st.markdown(brief)
-
-        st.download_button(
-            "📥 Scarica brief (txt)",
-            data=brief.encode("utf-8"),
-            file_name=f"brief_categoria_{re.sub(r'[^a-z0-9]+','_',kw.lower()).strip('_')}.txt",
-            mime="text/plain"
-        )
-
+        out = call_openai_brief(openai_api_key, system_prompt, user_prompt)
+        status.update(label="Output pronto", state="complete", expanded=False)
+        st.markdown("## ✅ Output")
+        st.markdown(out)
     except Exception as e:
         status.update(label="Errore", state="error", expanded=False)
         st.error(f"Errore OpenAI: {e}")
+
+# =========================
+# RUN: BATCH
+# =========================
+def detect_url_query_columns(df: pd.DataFrame):
+    cols = [c for c in df.columns]
+    cols_l = {str(c).strip().lower(): c for c in cols}
+
+    def pick(candidates):
+        for cand in candidates:
+            for lc, orig in cols_l.items():
+                if cand == lc or cand in lc:
+                    return orig
+        return None
+
+    url_col = pick(["url", "address", "pagina", "page", "link", "indirizzo"])
+    query_col = pick(["query", "keyword", "kw", "search", "ricerca"])
+
+    return url_col, query_col
+
+def run_batch_from_excel(file, competitor_urls_text: str):
+    if not openai_api_key:
+        st.error("Inserisci OpenAI key.")
+        return
+
+    try:
+        df = pd.read_excel(file, engine="openpyxl")
+    except Exception as e:
+        st.error(f"Non riesco a leggere l’Excel: {e}")
+        return
+
+    if df is None or df.empty:
+        st.error("Excel vuoto.")
+        return
+
+    url_col, query_col = detect_url_query_columns(df)
+    if not url_col or not query_col:
+        st.error("Non riesco a trovare le colonne. Serve una colonna URL e una colonna query.")
+        st.write("Colonne trovate:", list(df.columns))
+        return
+
+    df_work = df[[url_col, query_col]].copy()
+    df_work.columns = ["url", "query"]
+    df_work["url"] = df_work["url"].astype(str).map(safe_text)
+    df_work["query"] = df_work["query"].astype(str).map(safe_text)
+    df_work = df_work[(df_work["url"] != "") & (df_work["query"] != "")].reset_index(drop=True)
+
+    if df_work.empty:
+        st.error("Nessuna riga valida (URL/query).")
+        return
+
+    preferred_domains = normalize_lines(preferred_domains_text)
+    own_domain = domain_of(site_url) if exclude_own_domain else ""
+    manual_urls_global = normalize_lines(competitor_urls_text)
+
+    st.info(f"Righe da processare: {len(df_work)}")
+    prog = st.progress(0.0)
+    results_rows = []
+
+    for i, row in df_work.iterrows():
+        page_url = row["url"]
+        q = row["query"]
+
+        # Rexel facets per URL
+        brands_final, filters_final = [], []
+        rexel_http = None
+        rexel_err = ""
+        if page_url and "rexel.it" in domain_of(page_url):
+            rexel_debug = scrape_rexel_facets(page_url)
+            rexel_http = rexel_debug.get("http_status")
+            rexel_err = rexel_debug.get("error", "")
+            brands_final = (rexel_debug.get("brands") or [])[:60]
+            filters_final = (rexel_debug.get("filters") or [])[:40]
+
+        # competitor data per query
+        all_urls, serp_snap, comp_results = build_competitor_data(q, manual_urls_global, preferred_domains, own_domain)
+        wc_list = [r.get("word_count") for r in comp_results if isinstance(r.get("word_count"), int) and r.get("word_count") and r.get("word_count") > 0]
+        avg_wc = int(np.mean(wc_list)) if wc_list else 0
+        avg_wc, target_range = build_word_target(avg_wc, margin_pct, fallback_range)
+        comp_block = competitor_block_for_prompt(comp_results[:10])
+
+        system_prompt, user_prompt = build_prompts_for_row(
+            brand_name=brand_name,
+            site_url=site_url,
+            page_url=page_url,
+            query=q,
+            max_h2=max_h2,
+            avg_wc=avg_wc,
+            target_range=target_range,
+            brands_final=brands_final,
+            filters_final=filters_final,
+            competitor_block=comp_block
+        )
+
+        try:
+            out = call_openai_brief(openai_api_key, system_prompt, user_prompt)
+            h1, length, outline, faq = parse_output_sections(out)
+
+            results_rows.append({
+                "url": page_url,
+                "query": q,
+                "h1": h1,
+                "lunghezza_consigliata": length if length else target_range,
+                "outline": outline,
+                "faq_domande": faq,
+                "debug_rexel_http": rexel_http,
+                "debug_rexel_brands_count": len(brands_final),
+                "debug_rexel_filters_count": len(filters_final),
+                "raw_output": out
+            })
+
+        except Exception as e:
+            results_rows.append({
+                "url": page_url,
+                "query": q,
+                "h1": "",
+                "lunghezza_consigliata": target_range,
+                "outline": "",
+                "faq_domande": "",
+                "debug_rexel_http": rexel_http,
+                "debug_rexel_brands_count": len(brands_final),
+                "debug_rexel_filters_count": len(filters_final),
+                "raw_output": f"ERROR: {e}"
+            })
+
+        prog.progress((i + 1) / len(df_work))
+
+    prog.empty()
+
+    out_df = pd.DataFrame(results_rows)
+
+    st.success("Batch completato.")
+    st.dataframe(out_df[["url", "query", "h1", "lunghezza_consigliata", "debug_rexel_brands_count", "debug_rexel_filters_count"]], use_container_width=True)
+
+    with st.expander("Debug (prime 3 righe: outline + faq)", expanded=False):
+        for r in out_df.head(3).to_dict(orient="records"):
+            st.markdown(f"### {r['query']}")
+            st.write(r["url"])
+            st.markdown("**H1**")
+            st.write(r["h1"])
+            st.markdown("**Lunghezza**")
+            st.write(r["lunghezza_consigliata"])
+            st.markdown("**Outline**")
+            st.write(r["outline"])
+            st.markdown("**FAQ (domande)**")
+            st.write(r["faq_domande"])
+            st.markdown("---")
+
+    st.download_button(
+        "📥 Scarica output batch (xlsx)",
+        data=to_excel_bytes(out_df, sheet_name="brief"),
+        file_name="b2b_category_brief_batch.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+# =========================
+# DISPATCH
+# =========================
+if run_single:
+    run_for_one(page_url=page_url, query=query, competitor_urls_text=manual_competitor_urls)
+
+if run_batch:
+    if batch_file is None:
+        st.error("Carica un Excel.")
+    else:
+        run_batch_from_excel(batch_file, competitor_urls_text=batch_manual_competitor_urls)
