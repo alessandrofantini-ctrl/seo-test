@@ -12,25 +12,9 @@ import numpy as np
 # =========================
 # CONFIG
 # =========================
-st.set_page_config(page_title="B2B category brief generator (materiale elettrico)", layout="wide")
-st.title("🧩 B2B category brief generator (materiale elettrico)")
-
-DEFAULT_COMPETITORS = [
-    "https://it.rs-online.com/web/c/automazione-e-controllo-di-processo/contattori-e-contatti-ausiliari/contattori/",
-]
-
-PREFERRED_DOMAINS = [
-    "rs-online.com",
-    "sacchi.it",
-    "sonepar.it",
-    "marchiol.com",
-    "emmstore.it",
-    "comet.it",
-    "bticino.it",
-    "schneider-electric.it",
-    "siemens.com",
-    "abb.com",
-]
+st.set_page_config(page_title="B2B category brief (e-commerce materiale elettrico)", layout="wide")
+st.title("🧩 B2B category brief (e-commerce materiale elettrico)")
+st.caption("Brief tecnici per copywriter: struttura categoria, criteri di scelta, parametri e filtri. Poco informativo, molto operativo.")
 
 # =========================
 # HTTP session with retry
@@ -76,6 +60,7 @@ def remove_boilerplate(soup: BeautifulSoup):
     for selector in ["nav", "header", "footer", "aside", "form"]:
         for tag in soup.select(selector):
             tag.decompose()
+    # banner/popups frequenti
     for cls in ["cookie", "cookies", "cookie-banner", "newsletter", "modal", "popup"]:
         for tag in soup.select(f".{cls}"):
             tag.decompose()
@@ -93,19 +78,22 @@ def detect_main_container(soup: BeautifulSoup):
 def word_count(text: str) -> int:
     return len(re.findall(r"\w+", text or ""))
 
-def sentence_case(s: str) -> str:
+def clamp(s: str, n: int) -> str:
     s = safe_text(s)
-    if not s:
-        return ""
-    # evita title case automatico: metti solo la prima lettera maiuscola
-    if len(s) == 1:
-        return s.upper()
-    return s[0].upper() + s[1:]
+    return s[:n] if len(s) > n else s
 
 # =========================
 # SCRAPING competitor pages
 # =========================
-def scrape_page(url: str, max_text_chars=12000):
+def scrape_page(url: str, max_text_chars=14000):
+    """
+    Estrae segnali utili per category copy:
+    - title, meta description
+    - h1/h2/h3
+    - bullet (li)
+    - estratto testo (p + li)
+    - word_count stimata (su estratto)
+    """
     data = {
         "url": url,
         "domain": domain_of(url),
@@ -117,10 +105,13 @@ def scrape_page(url: str, max_text_chars=12000):
         "bullets": [],
         "text_sample": "",
         "word_count": 0,
+        "http_status": None,
+        "error": "",
     }
 
     try:
         r = HTTP.get(url, headers=UA, timeout=18, allow_redirects=True)
+        data["http_status"] = r.status_code
         if r.status_code >= 400 or not r.text:
             data["error"] = f"HTTP {r.status_code}"
             return data
@@ -138,7 +129,7 @@ def scrape_page(url: str, max_text_chars=12000):
         main = detect_main_container(soup)
 
         # headings
-        for tag in main.find_all(["h1", "h2", "h3"])[:90]:
+        for tag in main.find_all(["h1", "h2", "h3"])[:110]:
             txt = safe_text(tag.get_text(" ", strip=True))
             if not txt:
                 continue
@@ -146,33 +137,34 @@ def scrape_page(url: str, max_text_chars=12000):
                 data["h1"] = txt
             elif tag.name == "h2" and len(data["h2"]) < 30:
                 data["h2"].append(txt)
-            elif tag.name == "h3" and len(data["h3"]) < 40:
+            elif tag.name == "h3" and len(data["h3"]) < 45:
                 data["h3"].append(txt)
 
-        # bullets
-        for li in main.find_all("li")[:120]:
+        # bullets (li)
+        for li in main.find_all("li")[:160]:
             t = safe_text(li.get_text(" ", strip=True))
-            if t and 20 <= len(t) <= 180:
+            if t and 18 <= len(t) <= 200:
                 data["bullets"].append(t)
-        data["bullets"] = data["bullets"][:40]
+        data["bullets"] = data["bullets"][:45]
 
-        # text (paragraphs + bullet text)
+        # text sample (p + bullets)
         paragraphs = main.find_all("p")
         p_text = " ".join([safe_text(p.get_text(" ", strip=True)) for p in paragraphs])
         b_text = " ".join(data["bullets"])
         text = safe_text((p_text + " " + b_text).strip())
         if len(text) > max_text_chars:
             text = text[:max_text_chars]
-        data["text_sample"] = text[:2800]
+        data["text_sample"] = text[:3200]
         data["word_count"] = word_count(text)
 
         return data
+
     except Exception as e:
         data["error"] = str(e)
         return data
 
 # =========================
-# SERP (optional) via SerpApi
+# SERP via SerpApi (optional)
 # =========================
 @st.cache_data(show_spinner=False, ttl=60 * 60)
 def serpapi_search(query: str, api_key: str, gl="it", hl="it", domain="google.it"):
@@ -192,30 +184,53 @@ def serpapi_search(query: str, api_key: str, gl="it", hl="it", domain="google.it
     except Exception:
         return None
 
-def pick_competitor_urls_from_serp(serp_json, preferred_domains, max_urls=8):
+def pick_competitor_urls_from_serp(serp_json, preferred_domains, max_urls=10, exclude_domains=None):
     if not serp_json:
         return []
-    urls = []
-    for res in serp_json.get("organic_results", [])[:20]:
+    exclude_domains = exclude_domains or []
+
+    preferred = []
+    others = []
+
+    for res in serp_json.get("organic_results", [])[:25]:
         u = res.get("link")
         if not u:
             continue
         d = domain_of(u)
-        # spingi domini preferiti
+        if any(ex in d for ex in exclude_domains):
+            continue
+
         if any(pd in d for pd in preferred_domains):
-            urls.append(u)
-    # se pochi, aggiungi anche altri risultati (ma evita rexel.it se vuoi)
-    if len(urls) < max_urls:
-        for res in serp_json.get("organic_results", [])[:20]:
-            u = res.get("link")
-            if not u:
-                continue
-            d = domain_of(u)
-            if u not in urls and "rexel" not in d:
-                urls.append(u)
-            if len(urls) >= max_urls:
-                break
-    return urls[:max_urls]
+            preferred.append(u)
+        else:
+            others.append(u)
+
+    # prima preferiti, poi altri
+    out = []
+    for u in preferred + others:
+        if u not in out:
+            out.append(u)
+        if len(out) >= max_urls:
+            break
+    return out
+
+def serp_snapshot_compact(serp_json, max_items=10):
+    if not serp_json:
+        return None
+    return {
+        "organic": [
+            {
+                "position": r.get("position"),
+                "title": r.get("title"),
+                "link": r.get("link"),
+                "source": r.get("source"),
+                "snippet": r.get("snippet"),
+            }
+            for r in serp_json.get("organic_results", [])[:max_items]
+        ],
+        "paa": [x.get("question") for x in serp_json.get("related_questions", [])[:20] if x.get("question")],
+        "related": [x.get("query") for x in serp_json.get("related_searches", [])[:20] if x.get("query")],
+    }
 
 # =========================
 # SIDEBAR
@@ -228,23 +243,43 @@ with st.sidebar:
         openai_api_key = st.secrets["OPENAI_API_KEY"]
 
     st.markdown("---")
-    st.subheader("SERP (opzionale)")
+    st.subheader("SERP (opzionale ma consigliato)")
     use_serp = st.toggle("Usa SerpApi per trovare competitor in SERP", value=True)
     serp_api_key = st.text_input("SerpApi key", type="password") if use_serp else ""
-    st.caption("Se attivo: il tool prende URL dalla SERP e dà priorità ai competitor principali.")
+    serp_max_urls = st.slider("Numero risultati SERP da considerare", 3, 15, 10)
 
     st.markdown("---")
-    st.subheader("Target parole")
-    st.caption("Calcolato sulla media competitor + margine. Puoi forzare un margine diverso.")
+    st.subheader("Competitor da privilegiare")
+    st.caption("Uno per riga: domini che vuoi prioritari in SERP (es. rs-online.com).")
+    preferred_domains_text = st.text_area(
+        "Domini prioritari",
+        value="\n".join([
+            "rs-online.com",
+            "sacchi.it",
+            "sonepar.it",
+            "marchiol.com",
+            "emmstore.it",
+            "comet.it",
+        ]),
+        height=130
+    )
+
+    st.markdown("---")
+    st.subheader("Word count target")
     margin_pct = st.slider("Margine su media competitor (%)", 0, 60, 20, step=5)
+    fallback_range = st.selectbox("Range default se non ho competitor utili", ["450–750", "550–900", "700–1100"], index=1)
 
     st.markdown("---")
-    st.subheader("Stile copy")
-    tone = st.selectbox("Tono", ["Tecnico B2B (consigliato)", "Tecnico + commerciale", "Solo catalogo sintetico"], index=0)
+    st.subheader("Stile output")
+    tone = st.selectbox("Tono", ["Tecnico B2B (consigliato)", "Tecnico + commerciale", "Catalogo sintetico"], index=0)
+    max_h2 = st.slider("Massimo H2", 4, 10, 8)
+    include_microcopy = st.toggle("Includi microcopy + avvertenze", value=True)
 
     st.markdown("---")
     st.subheader("Brand")
-    st.text_input("Sito target", value="https://rexel.it/", disabled=True)
+    brand_name = st.text_input("Nome azienda/brand", value="Rexel")
+    site_url = st.text_input("Sito", value="https://rexel.it/")
+    exclude_own_domain = st.toggle("Escludi il dominio del brand dalla SERP", value=True)
 
 # =========================
 # MAIN INPUTS
@@ -253,74 +288,130 @@ col1, col2 = st.columns([2, 1])
 with col1:
     category_name = st.text_input("Nome categoria (es. Contattori)", placeholder="Contattori")
 with col2:
-    primary_kw = st.text_input("Keyword principale (es. contattori)", placeholder="contattori")
+    primary_kw = st.text_input("Keyword principale", placeholder="contattori")
 
-st.markdown("### URL competitor (manuale)")
-competitor_urls_text = st.text_area(
-    "Uno per riga (puoi lasciare vuoto e usare solo SERP se attivo)",
-    value="\n".join(DEFAULT_COMPETITORS),
-    height=140
+st.markdown("### Extra (opzionale)")
+col3, col4 = st.columns(2)
+with col3:
+    known_subcats = st.text_area("Sotto-categorie note (una per riga)", height=120, placeholder="Es.\nContattori modulari\nContattori tripolari\nContatti ausiliari")
+with col4:
+    known_brands = st.text_area("Marche principali (una per riga)", height=120, placeholder="Es.\nSchneider Electric\nSiemens\nABB")
+
+known_filters = st.text_area(
+    "Filtri reali del catalogo (opzionale, uno per riga)",
+    height=90,
+    placeholder="Es.\nNumero poli\nTensione bobina\nPotenza nominale\nMontaggio"
 )
 
 st.markdown("---")
+st.markdown("### URL competitor (opzionale)")
+st.caption("Se li inserisci, il tool li userà sempre. Se non li inserisci, può recuperarli dalla SERP (se attivo).")
+manual_competitor_urls = st.text_area(
+    "Uno per riga (anche vuoto)",
+    height=110,
+    placeholder="Incolla qui URL di pagine categoria competitor"
+)
 
 # =========================
-# RUN
+# GENERATION
 # =========================
-if st.button("🚀 Genera spunti per categoria B2B"):
+def build_word_target(avg_wc: int, margin_pct: int, fallback_range: str):
+    if avg_wc and avg_wc > 200:
+        # target = media + margine, con range leggermente ampio
+        lo = int(avg_wc * (1 + max(0, margin_pct - 10) / 100))
+        hi = int(avg_wc * (1 + (margin_pct + 10) / 100))
+        lo = max(350, lo)
+        hi = max(lo + 150, hi)
+        return avg_wc, f"{lo}–{hi}"
+    return 0, fallback_range
+
+def competitor_block_for_prompt(comps):
+    # riduci token, ma mantieni segnali tecnici (bullets + h2)
+    out = []
+    for c in comps:
+        out.append({
+            "url": c.get("url"),
+            "domain": c.get("domain"),
+            "h1": clamp(c.get("h1"), 140),
+            "h2": [clamp(x, 120) for x in (c.get("h2") or [])[:12]],
+            "bullets": [clamp(x, 160) for x in (c.get("bullets") or [])[:18]],
+            "word_count": c.get("word_count", 0),
+            "text_sample": clamp(c.get("text_sample"), 1200),
+            "error": c.get("error", ""),
+        })
+    return out
+
+def normalize_lines(text_area_value: str):
+    return [safe_text(x) for x in (text_area_value or "").splitlines() if safe_text(x)]
+
+# =========================
+# RUN BUTTON
+# =========================
+if st.button("🚀 Genera brief per categoria"):
     if not openai_api_key:
         st.error("Inserisci OpenAI key.")
         st.stop()
-    if not primary_kw and not category_name:
+
+    if not (primary_kw or category_name):
         st.error("Inserisci almeno nome categoria o keyword principale.")
         st.stop()
 
-    # build competitor list
-    manual_urls = [safe_text(x) for x in competitor_urls_text.splitlines() if safe_text(x)]
-    competitor_urls = list(dict.fromkeys(manual_urls))  # dedupe
+    # inputs
+    cat = safe_text(category_name) or safe_text(primary_kw)
+    kw = safe_text(primary_kw) or safe_text(category_name)
 
-    serp_snapshot = None
+    preferred_domains = normalize_lines(preferred_domains_text)
+    own_domain = domain_of(site_url) if exclude_own_domain else ""
+    exclude_domains = [own_domain] if own_domain else []
+
+    manual_urls = normalize_lines(manual_competitor_urls)
+
+    # SERP
+    serp_json = None
+    serp_snap = None
+    serp_urls = []
+
     if use_serp:
         if not serp_api_key:
             st.error("SerpApi attiva: inserisci SerpApi key.")
             st.stop()
 
-        q = primary_kw or category_name
         status = st.status("🔍 Analisi SERP…", expanded=True)
-        serp_json = serpapi_search(q, serp_api_key, gl="it", hl="it", domain="google.it")
-        if serp_json:
-            serp_snapshot = {
-                "query": q,
-                "organic_sample": [
-                    {
-                        "position": r.get("position"),
-                        "title": r.get("title"),
-                        "link": r.get("link"),
-                        "source": r.get("source"),
-                        "snippet": r.get("snippet"),
-                    }
-                    for r in serp_json.get("organic_results", [])[:10]
-                ]
-            }
-            serp_urls = pick_competitor_urls_from_serp(serp_json, PREFERRED_DOMAINS, max_urls=8)
-            # unisci, ma evita duplicati
-            for u in serp_urls:
-                if u not in competitor_urls:
-                    competitor_urls.append(u)
-
+        serp_json = serpapi_search(kw, serp_api_key, gl="it", hl="it", domain="google.it")
+        serp_snap = serp_snapshot_compact(serp_json, max_items=10) if serp_json else None
+        serp_urls = pick_competitor_urls_from_serp(
+            serp_json,
+            preferred_domains=preferred_domains,
+            max_urls=serp_max_urls,
+            exclude_domains=exclude_domains
+        ) if serp_json else []
         status.update(label="SERP pronta", state="complete", expanded=False)
 
+    # merge URLs: manual first, then serp
+    competitor_urls = []
+    for u in manual_urls + serp_urls:
+        if u and u not in competitor_urls:
+            competitor_urls.append(u)
+
     if not competitor_urls:
-        st.error("Nessun competitor URL: inserisci manualmente almeno un URL o attiva SERP.")
+        st.error("Nessun competitor URL disponibile: inserisci URL manuali o attiva SERP.")
         st.stop()
+
+    # show SERP debug
+    if serp_snap:
+        with st.expander("SERP snapshot (debug)", expanded=False):
+            st.json(serp_snap, expanded=2)
 
     # scrape competitors
     status = st.status("🕷️ Lettura competitor (contenuti)…", expanded=True)
     results = []
+    max_scrape = min(len(competitor_urls), 12)
+    urls_to_scrape = competitor_urls[:max_scrape]
+
     with ThreadPoolExecutor(max_workers=6) as ex:
-        futs = [ex.submit(scrape_page, u) for u in competitor_urls[:12]]
-        done = 0
+        futs = [ex.submit(scrape_page, u) for u in urls_to_scrape]
         prog = status.progress(0.0)
+        done = 0
         for f in as_completed(futs):
             done += 1
             prog.progress(done / max(1, len(futs)))
@@ -328,19 +419,24 @@ if st.button("🚀 Genera spunti per categoria B2B"):
     prog.empty()
     status.update(label="Competitor letti", state="complete", expanded=False)
 
-    # debug SERP
-    if serp_snapshot:
-        with st.expander("SERP snapshot (debug)", expanded=False):
-            st.json(serp_snapshot, expanded=2)
-
-    # debug competitor
+    # competitor debug (contenuti)
     with st.expander("Competitor snapshot (debug)", expanded=False):
-        for c in sorted(results, key=lambda x: x.get("word_count", 0), reverse=True):
-            label = f"{c.get('domain','')} — {sentence_case(c.get('h1') or c.get('title') or c.get('url'))[:70]}"
+        # ordina: prima domini preferiti, poi per word_count
+        def pref_rank(d):
+            d = (d or "").lower()
+            for i, pdm in enumerate(preferred_domains):
+                if pdm in d:
+                    return 0, i
+            return 1, 999
+
+        results_sorted = sorted(results, key=lambda x: (pref_rank(x.get("domain")), -(x.get("word_count") or 0)))
+        for c in results_sorted:
+            label = f"{c.get('domain','')} — {clamp(c.get('h1') or c.get('title') or c.get('url'), 80)}"
             with st.expander(label, expanded=False):
                 st.json({
                     "url": c.get("url"),
                     "domain": c.get("domain"),
+                    "http_status": c.get("http_status"),
                     "title": c.get("title"),
                     "meta_description": c.get("meta_description"),
                     "h1": c.get("h1"),
@@ -353,105 +449,137 @@ if st.button("🚀 Genera spunti per categoria B2B"):
                 }, expanded=2)
 
     # word count target
-    wc_list = [r["word_count"] for r in results if isinstance(r.get("word_count"), int) and r["word_count"] > 0]
+    wc_list = [r.get("word_count") for r in results if isinstance(r.get("word_count"), int) and r.get("word_count") and r.get("word_count") > 0]
     avg_wc = int(np.mean(wc_list)) if wc_list else 0
-    target_min = int(avg_wc * (1 + max(0, margin_pct - 10) / 100)) if avg_wc else 900
-    target_max = int(avg_wc * (1 + (margin_pct + 10) / 100)) if avg_wc else 1300
+    avg_wc, target_range = build_word_target(avg_wc, margin_pct, fallback_range)
 
     st.markdown("### 📏 Lunghezza consigliata")
     if avg_wc:
         st.write(f"- Media competitor (stimata): **{avg_wc} parole**")
-    st.write(f"- Target consigliato: **{target_min}–{target_max} parole** (media + margine)")
+    else:
+        st.write("- Media competitor non disponibile (scraping limitato o pagine non leggibili).")
+    st.write(f"- Target consigliato: **{target_range} parole**")
 
-    # build condensed competitor block for prompt
-    comp_block = []
-    for c in results[:10]:
-        comp_block.append({
-            "url": c.get("url"),
-            "domain": c.get("domain"),
-            "h1": c.get("h1"),
-            "h2": c.get("h2", [])[:12],
-            "bullets": c.get("bullets", [])[:18],
-            "word_count": c.get("word_count", 0),
-            "text_sample": c.get("text_sample", "")[:1200]
-        })
+    # prepare prompt inputs
+    subcats = normalize_lines(known_subcats)
+    brands = normalize_lines(known_brands)
+    filters = normalize_lines(known_filters)
 
-    # OpenAI synthesis
+    comp_block = competitor_block_for_prompt(results_sorted[:10])
+
+    # AI brief
     client = OpenAI(api_key=openai_api_key)
 
-    system_prompt = (
-        "Sei un senior SEO e-commerce B2B (materiale elettrico). "
-        "Scrivi spunti per copywriter per categorie di prodotto. "
-        "Devi essere tecnico e utile alla scelta. Niente teoria generica. "
-        "Stile: frasi brevi, lessico tecnico, orientato a filtri e specifiche."
-    )
-
-    user_prompt = f"""
-Sito target: rexel.it (B2B materiale elettrico)
-Categoria: "{category_name or primary_kw}"
-Keyword principale: "{primary_kw or category_name}"
+    system_prompt = f"""
+Sei un senior SEO e-commerce B2B specializzato in materiale elettrico.
+Crei brief operativi per testi di categoria (category page) destinati a buyer tecnici.
 
 Obiettivo:
-Generare un brief operativo per copywriter per il testo categoria e-commerce.
-Deve essere prevalentemente tecnico e di qualità, poco informativo.
+- contenuto utile alla scelta e all'acquisto (specifiche, compatibilità, criteri, filtri)
+- poco informativo, niente storia/definizioni scolastiche
 
-Vincoli stile:
-- Maiuscole: sentence case (solo prima lettera maiuscola), non title case.
-- Evita fuffa tipo "rivoluzionare", "nel mondo di oggi".
-- Paragrafi corti, bullet utili.
-- Evita dati numerici inventati.
+Regole editoriali:
+- frasi brevi, lessico tecnico, orientato ai filtri
+- maiuscole: sentence case (solo prima lettera maiuscola), evita title case
+- niente numeri inventati e niente claim non verificabili
+- evita fuffa e ripetizioni
+- output in italiano
+"""
 
-Lunghezza target:
-- media competitor stimata: {avg_wc}
-- target: {target_min}–{target_max} parole
+    user_prompt = f"""
+Brand: {brand_name}
+Sito: {site_url}
+Categoria: "{cat}"
+Keyword principale: "{kw}"
 
-Competitor (segnali estratti):
-{json.dumps(comp_block, ensure_ascii=False)}
+Contesto (se disponibile):
+- sotto-categorie note: {subcats if subcats else "non fornite"}
+- marche principali: {brands if brands else "non fornite"}
+- filtri reali catalogo: {filters if filters else "non forniti"}
+
+SERP/competitor (segnali estratti, possono essere incompleti):
+- domini prioritari: {preferred_domains if preferred_domains else "non forniti"}
+- media parole competitor stimata: {avg_wc if avg_wc else "non disponibile"}
+- target parole consigliato: {target_range}
+- estratti competitor (json): {json.dumps(comp_block, ensure_ascii=False)}
+
+Vincoli:
+- Non scrivere un articolo informativo: evita sezioni lunghe "cos'è".
+- Struttura da category page B2B: breve intro, guida alla scelta, varianti, compatibilità, accessori, note pratiche.
+- Inserisci solo parametri tecnici plausibili per la categoria (non inventare specifiche strane).
+- Niente title case.
 
 Output richiesto (formato obbligatorio):
 
 ## meta
-- meta title (3 varianti, <= 60 caratteri): usa pattern "keyword | Rexel" in 1 variante, le altre più tecniche.
-- meta description (3 varianti, <= 155 caratteri): orientate a specifiche/assortimento/brand.
+- meta title (3 varianti, <= 60 caratteri):
+  - una variante con pattern: "{kw} | {brand_name}"
+  - due varianti tecniche orientate a selezione/assortimento (no slogan)
+- meta description (3 varianti, <= 155 caratteri):
+  - orientate a specifiche, assortimento, filtri, uso B2B
+  - niente promesse vaghe
 
 ## h1
-- 1 proposta
+- 1 proposta (sentence case)
+
+## lunghezza consigliata
+- se la media competitor è disponibile: conferma target = media + 15–25%
+- se non disponibile: conferma target = {fallback_range}
+- motivazione: 2 righe pratiche (solo utilità e-commerce)
 
 ## outline (H2/H3)
-Max 8 H2.
-Per ogni H2: 2–4 H3 + una Nota (IT) su cosa scrivere (parametri tecnici, criteri scelta, compatibilità, norme).
+Massimo {max_h2} H2.
+Per ogni H2:
+- 2–4 H3
+- una Nota (IT) pratica su cosa scrivere con focus su: criteri di scelta, compatibilità/installazione, differenze tra varianti, errori comuni.
+Evita H2 generici tipo "cos'è" (se serve, massimo 3 righe in intro).
 
 ## parametri tecnici da coprire (checklist)
-Lista di 12–20 punti tecnici tipici della categoria (es. poli, tensione bobina, potenza, categoria di impiego, ecc.).
-Non inventare: se un parametro non è tipico, non inserirlo.
+Lista 12–20 punti tecnici tipici della categoria.
 
 ## filtri consigliati per e-commerce
-Suggerisci 10–15 filtri/facet utili (tipo "numero poli", "tensione bobina", ...).
+Suggerisci 10–15 filtri/facet realistici per la categoria.
 
-## microcopy utile
-- 6 micro-frasi per aiutare l'utente (es. "scegli la tensione bobina in base a…")
-- 6 avvertenze/compatibilità (es. quadro, guida DIN, normative)
+{"## microcopy utile\n- 6 micro-frasi per aiutare la selezione\n- 6 avvertenze/compatibilità\n" if include_microcopy else ""}
 
 ## faq tecniche (5)
-Domande tecniche che un buyer B2B fa davvero. Risposte 1–2 frasi.
+Domande che un buyer B2B fa davvero. Risposte 1–2 frasi, pratiche.
 
 ## note per copywriter
-5 regole pratiche per scrivere il testo categoria su rexel.it (tono, lunghezza paragrafi, parole vietate, ecc.)
+5 regole pratiche per scrivere la categoria:
+- tono
+- lunghezza paragrafi
+- uso bullet
+- densità keyword naturale (senza ripetizioni)
+- parole/claim da evitare
 
 Non aggiungere altre sezioni.
 """
 
-    status = st.status("🧠 Generazione brief tecnico…", expanded=True)
-    resp = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        temperature=0.4
-    )
-    brief = resp.choices[0].message.content
-    status.update(label="Brief pronto", state="complete", expanded=False)
+    status = st.status("🧠 Generazione brief…", expanded=True)
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.35
+        )
+        brief = resp.choices[0].message.content
+        status.update(label="Brief pronto", state="complete", expanded=False)
 
-    st.markdown("## ✅ Brief per copywriter")
-    st.markdown(brief)
+        st.markdown("## ✅ Brief per copywriter")
+        st.markdown(brief)
+
+        # download as txt
+        st.download_button(
+            "📥 Scarica brief (txt)",
+            data=brief.encode("utf-8"),
+            file_name=f"brief_categoria_{re.sub(r'[^a-z0-9]+','_',kw.lower()).strip('_')}.txt",
+            mime="text/plain"
+        )
+
+    except Exception as e:
+        status.update(label="Errore", state="error", expanded=False)
+        st.error(f"Errore OpenAI: {e}")
