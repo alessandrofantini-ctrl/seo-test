@@ -13,7 +13,7 @@ import numpy as np
 # CONFIG
 # =========================
 st.set_page_config(page_title="B2B category brief (e-commerce materiale elettrico)", layout="wide")
-st.title("🧩 B2B category brief (e-commerce materiale elettrico)")
+st.title("🧩 B2B category brief REXEL")
 st.caption("Brief tecnici per copywriter: struttura categoria, criteri di scelta, parametri e filtri. Poco informativo, molto operativo.")
 
 # =========================
