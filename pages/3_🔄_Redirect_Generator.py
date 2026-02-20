@@ -16,8 +16,8 @@ BATCH_SIZE = 100
 # =========================
 # UI SETUP
 # =========================
-st.set_page_config(page_title="AI Redirect Mapper - SEO Senior", layout="wide")
-st.title("🎯 AI Redirect Mapper - Senior SEO Edition")
+st.set_page_config(page_title="AI Redirect Mapper", layout="wide")
+st.title("🎯 AI Redirect Mapper")
 
 with st.sidebar:
     st.header("⚙️ Configurazione Strategica")
@@ -26,33 +26,29 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("📚 Logica SEO")
     st.info("""
-    - **Solo HTML**: Vengono elaborati solo i file con 'text/html'.
-    - **Pool Linguistico**: Se una lingua esiste nel nuovo sito, l'URL rimarrà in quella lingua.
-    - **Zero 404**: Se il match è debole, l'URL punta alla Home della lingua corretta.
+    - **Solo HTML**: Filtra ed elabora solo pagine text/html.
+    - **Silo Linguistico**: Se l'URL è spagnolo, cercherà match SOLO in spagnolo.
+    - **Zero 404**: Se il match è incerto, punta alla Home della lingua corretta.
     """)
     
     threshold_primary = st.slider("Soglia Similarità Minima", 0.0, 1.0, 0.45, 
-                                 help="Sotto questa soglia, per sicurezza, lo script manderà l'utente alla Home di lingua.")
+                                 help="Sotto questa soglia, per sicurezza, l'URL andrà alla Home di lingua.")
 
     st.markdown("---")
-    st.subheader("🌐 Mappatura Domini Dismessi")
-    st.write("Configura i domini che cambiano lingua o destinazione.")
-    
+    st.subheader("🌐 Mappatura Domini/Lingue")
     domain_map_input = st.text_area(
         "Formato: dominio:lingua (uno per riga)", 
         value="bossong-befestigungssysteme.de:en\nbossong.es:es\nbossong.it:it",
-        help="Esempio: bossong.de:en trasformerà tutti i vecchi URL .de in pool inglese."
+        help="Esempio: bossong.de:en mappa i vecchi URL tedeschi sul pool inglese."
     )
 
 # =========================
-# FUNZIONI ROBUSTE
+# FUNZIONI DI SUPPORTO
 # =========================
 
 def get_domain_map(input_text):
-    """Estrae la mappa dei domini in modo sicuro, ignorando righe vuote."""
     d_map = {}
-    if not input_text.strip():
-        return d_map
+    if not input_text.strip(): return d_map
     for line in input_text.split('\n'):
         line = line.strip()
         if ":" in line:
@@ -64,12 +60,10 @@ def get_domain_map(input_text):
     return d_map
 
 def load_files_combined(files) -> pd.DataFrame:
-    """Carica e unisce più file CSV o Excel."""
     all_dfs = []
     for file in files:
         try:
-            name = (file.name or "").lower()
-            if name.endswith((".xlsx", ".xls")):
+            if file.name.lower().endswith((".xlsx", ".xls")):
                 df = pd.read_excel(file, engine="openpyxl")
             else:
                 for enc in ["utf-8", "ISO-8859-1", "cp1252"]:
@@ -83,7 +77,6 @@ def load_files_combined(files) -> pd.DataFrame:
     return pd.concat(all_dfs, ignore_index=True) if all_dfs else None
 
 def is_html_and_200(row, check_status=False):
-    """Filtra solo contenuti HTML e, se richiesto, solo Status 200."""
     c_type = str(row.get("Content Type", "")).lower()
     is_html = "text/html" in c_type or "html" in c_type
     if check_status:
@@ -92,42 +85,30 @@ def is_html_and_200(row, check_status=False):
     return is_html
 
 def detect_language(url: str, domain_mapping: dict) -> str:
-    """Rileva la lingua basandosi su Dominio, Cartella o Mappatura manuale."""
     p = urlparse(url)
     domain = p.netloc.lower().replace("www.", "")
     path = p.path.lower()
-    
-    # 1. Mappatura esplicita del dominio (es. .de -> en)
-    if domain in domain_mapping:
-        return domain_mapping[domain]
-    
-    # 2. Sottocartelle (es. /es/, /en/)
+    if domain in domain_mapping: return domain_mapping[domain]
     m = re.search(r"/([a-z]{2})(?:/|$)", path)
     if m: return m.group(1)
-    
-    # 3. Estensione Dominio
     if domain.endswith(".it"): return "it"
     if domain.endswith(".es"): return "es"
-    if domain.endswith(".de"): return "de"
-    
-    return "it" # Default Bossong
+    return "it" # Default
 
 def clean_seo_text(row: pd.Series) -> str:
-    """Crea una stringa di testo ottimizzata per l'AI."""
     url = str(row.get("Address", ""))
-    # Estraiamo lo slug per dare forza ai nomi prodotto (es. 'ba.html' -> 'ba')
-    slug = urlparse(url).path.replace("/", " ").replace("-", " ").replace(".html", "").replace(".php", "")
+    slug = urlparse(url).path.replace("/", " ").replace("-", " ").replace(".html", "")
     t = str(row.get("Title 1", ""))
     h1 = str(row.get("H1-1", ""))
-    return f"PRODUCT_SLUG: {slug} | TITLE: {t} | H1: {h1}".strip()[:7000]
+    return f"SLUG: {slug} | TITLE: {t} | H1: {h1}".strip()[:7000]
 
 # =========================
-# LOGICA DI CORE
+# CORE ENGINE
 # =========================
 
 col1, col2 = st.columns(2)
-with col1: old_files = st.file_uploader("📂 Vecchio Sito (Export SF)", accept_multiple_files=True)
-with col2: new_files = st.file_uploader("📂 Nuovo Sito (Destinazioni)", accept_multiple_files=True)
+with col1: old_files = st.file_uploader("📂 Vecchio Sito", accept_multiple_files=True)
+with col2: new_files = st.file_uploader("📂 Nuovo Sito", accept_multiple_files=True)
 
 if old_files and new_files:
     d_mapping = get_domain_map(domain_map_input)
@@ -135,23 +116,22 @@ if old_files and new_files:
     df_new_raw = load_files_combined(new_files)
 
     if df_old_raw is not None and df_new_raw is not None:
-        # APPLICAZIONE FILTRI HTML
-        df_old = df_old_raw[df_old_raw.apply(lambda r: is_html_and_200(r, False), axis=1)].copy()
-        df_new = df_new_raw[df_new_raw.apply(lambda r: is_html_and_200(r, True), axis=1)].copy()
+        # FILTRO E RESET INDICI (Fondamentale per evitare IndexError)
+        df_old = df_old_raw[df_old_raw.apply(lambda r: is_html_and_200(r, False), axis=1)].copy().reset_index(drop=True)
+        df_new = df_new_raw[df_new_raw.apply(lambda r: is_html_and_200(r, True), axis=1)].copy().reset_index(drop=True)
 
         df_old["lang"] = df_old["Address"].apply(lambda x: detect_language(x, d_mapping))
         df_new["lang"] = df_new["Address"].apply(lambda x: detect_language(x, {}))
 
-        st.success(f"Analisi pronta: {len(df_old)} pagine vecchie vs {len(df_new)} nuove destinazioni HTML.")
+        st.success(f"Dati: {len(df_old)} sorgenti vs {len(df_new)} destinazioni HTML filtrate.")
 
-        if st.button("🚀 AVVIA MATCHING PROFESSIONALE"):
-            if not openai_api_key: st.error("Inserisci l'API Key!"); st.stop()
+        if st.button("🚀 AVVIA GENERAZIONE REDIRECT"):
+            if not openai_api_key: st.error("Manca API Key"); st.stop()
             client = OpenAI(api_key=openai_api_key)
-            
-            status = st.status("Processo in corso...")
-            
+            status = st.status("Elaborazione...")
+
             # 1. Embedding
-            status.write("🧠 Creazione vettori semantici (OpenAI)...")
+            status.write("🧠 Creazione vettori semantici...")
             old_texts = df_old.apply(clean_seo_text, axis=1).tolist()
             new_texts = df_new.apply(clean_seo_text, axis=1).tolist()
             
@@ -167,48 +147,46 @@ if old_files and new_files:
             sims = cosine_similarity(emb_old, emb_new)
 
             # 2. Matching con Progress Bar
-            status.write("🔍 Applicazione regole di isolamento linguistico...")
-            match_progress = st.progress(0, text="Mappatura URL...")
+            status.write("🔍 Applicazione regole SEO...")
+            progress = st.progress(0, text="Inizio...")
             
-            # Identificazione Home Page per Fallback
+            # Identificazione Home di Lingua
             home_pages = {}
             for l in df_new["lang"].unique():
                 subset = df_new[df_new["lang"] == l]
-                # La home è solitamente quella con l'URL più corto o solo la cartella
                 home_pages[l] = subset.loc[subset['Address'].str.len().idxmin()]['Address']
 
             results = []
             for i in range(len(df_old)):
-                # Update progress bar
-                match_progress.progress((i + 1) / len(df_old), text=f"Elaborazione {i+1} di {len(df_old)}")
+                progress.progress((i + 1) / len(df_old), text=f"Mappatura {i+1}/{len(df_old)}")
                 
                 old_url = df_old.iloc[i]["Address"]
                 old_lang = df_old.iloc[i]["lang"]
                 
-                # REGOLE SEO SENIOR:
-                # Se la lingua esiste nel nuovo sito, cerchiamo SOLO in quel pool.
+                # REGOLE DI SILOS LINGUISTICO
                 pool_idxs = df_new.index[df_new["lang"] == old_lang].tolist()
                 
-                # Se la lingua non esiste (es. DE rimosso), cerchiamo nel pool Inglese.
+                # Se la lingua non esiste (es. DE rimosso), fallback su EN
+                target_lang_for_fallback = old_lang
                 if not pool_idxs:
                     pool_idxs = df_new.index[df_new["lang"] == "en"].tolist()
-                    current_target_lang = "en"
-                else:
-                    current_target_lang = old_lang
+                    target_lang_for_fallback = "en"
                 
-                best_url = home_pages.get(current_target_lang, old_url) # Fallback alla home di lingua
+                # Inizializza con Home di lingua (Zero 404 policy)
+                best_url = home_pages.get(target_lang_for_fallback, df_new.iloc[0]["Address"])
                 best_score = 0
                 method = "Fallback: Home di Lingua"
 
                 if pool_idxs:
+                    # Estraiamo solo le colonne del pool linguistico dalla matrice sims
                     pool_sims = sims[i, pool_idxs]
-                    best_local_idx = np.argmax(pool_sims)
-                    score = pool_sims[best_local_idx]
+                    local_idx = np.argmax(pool_sims)
+                    score = pool_sims[local_idx]
                     
                     if score >= threshold_primary:
-                        best_url = df_new.iloc[pool_idxs[best_local_idx]]["Address"]
+                        best_url = df_new.iloc[pool_idxs[local_idx]]["Address"]
                         best_score = score
-                        method = f"Match Semantico ({current_target_lang.upper()})"
+                        method = f"Match Semantico ({target_lang_for_fallback.upper()})"
                 
                 results.append({
                     "Old URL": old_url,
@@ -217,15 +195,13 @@ if old_files and new_files:
                     "Method": method
                 })
 
-            match_progress.empty()
-            status.update(label="Matching completato!", state="complete", expanded=False)
+            progress.empty()
+            status.update(label="Completato!", state="complete", expanded=False)
             
             final_df = pd.DataFrame(results)
-            st.subheader("Risultati Mappatura")
             st.dataframe(final_df, use_container_width=True)
             
-            # Download
             output = BytesIO()
             with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
                 final_df.to_excel(writer, index=False)
-            st.download_button("📥 Scarica Excel", output.getvalue(), "redirect_map_bossong.xlsx")
+            st.download_button("📥 Scarica Redirect Map", output.getvalue(), "redirect_map_final.xlsx")
