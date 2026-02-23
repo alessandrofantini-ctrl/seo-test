@@ -291,12 +291,15 @@ if old_files and new_files:
             # Override lingua se il dominio è nella lista forzata
             forced_lang = get_forced_lang(old_url, forced_mapping)
             match_lang  = forced_lang if forced_lang else old_lang
+
+            # Pool di destinazione: lingua forzata o stessa lingua, fallback → inglese
+            pool_mask = df_new["lang"] == match_lang
             if not pool_mask.any():
                 pool_mask = df_new["lang"] == "en"
             pool_pos_idxs = np.where(pool_mask.values)[0].tolist()  # indici POSIZIONALI
 
-            # Valori di default
-            best_url  = home_pages.get(old_lang, home_pages.get("en", df_new.iloc[0]["Address"]))
+            # Valori di default (usa match_lang per la home corretta)
+            best_url  = home_pages.get(match_lang, home_pages.get("en", df_new.iloc[0]["Address"]))
             best_score = 0.0
             method     = "Fallback: Home di Lingua"
 
