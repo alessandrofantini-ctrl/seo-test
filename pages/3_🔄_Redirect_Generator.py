@@ -29,6 +29,15 @@ with st.sidebar:
     )
 
     st.markdown("---")
+    st.subheader("🌍 Lingua Root Nuovo Sito")
+    st.caption("Se il nuovo sito non ha sottocartella lingua alla root (es: /it/ assente ma il contenuto è italiano), specifica qui la lingua della root.")
+    root_lang = st.selectbox(
+        "Lingua della root del nuovo sito",
+        options=["it", "en", "es", "de", "fr", "pt"],
+        index=0,
+    )
+
+    st.markdown("---")
     st.subheader("🔀 Forza Domini → Lingua Destinazione")
     st.caption("I domini qui elencati verranno sempre matchati nel pool della lingua indicata, ignorando la loro lingua originale.")
     forced_domain_input = st.text_area(
@@ -93,7 +102,7 @@ def get_domain_map(text: str) -> dict:
 # Lingue valide ISO 639-1 — evitiamo falsi positivi come "us", "co", "de" dentro parole
 VALID_LANGS = {"it", "es", "de", "fr", "en", "pt", "nl", "pl", "ru", "zh", "ja", "ar"}
 
-def detect_language(url: str, domain_mapping: dict) -> str:
+def detect_language(url: str, domain_mapping: dict, root_lang: str = "en") -> str:
     p = urlparse(url)
     domain = p.netloc.lower().replace("www.", "")
 
@@ -115,12 +124,13 @@ def detect_language(url: str, domain_mapping: dict) -> str:
     if domain.endswith(".nl"):  return "nl"
 
     # 4. Sottocartella lingua — solo PRIMO segmento del path e solo se lingua valida
-    #    Es: /it/prodotti → "it"   /contact-us → ignorato
+    #    Es: /en/products → "en"   /contact-us → ignorato (root_lang)
     parts = [s for s in p.path.lower().split("/") if s]
     if parts and len(parts[0]) == 2 and parts[0] in VALID_LANGS:
         return parts[0]
 
-    return "en"
+    # 5. Nessun segnale trovato → lingua della root (configurabile)
+    return root_lang
 
 def get_seo_content(row: pd.Series) -> str:
     """
@@ -258,7 +268,7 @@ if old_files and new_files:
 
     # Rilevamento lingua con domain mapping su entrambi i siti
     df_old["lang"] = df_old["Address"].apply(lambda x: detect_language(x, d_mapping))
-    df_new["lang"] = df_new["Address"].apply(lambda x: detect_language(x, d_mapping))
+    df_new["lang"] = df_new["Address"].apply(lambda x: detect_language(x, d_mapping, root_lang=root_lang))
 
     # ── DEBUG: mostra lingua rilevata per ogni URL ──────────────────────
     with st.expander("🔍 Debug: Lingue rilevate (controlla qui se vedi errori)"):
