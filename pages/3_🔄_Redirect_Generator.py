@@ -90,19 +90,36 @@ def get_domain_map(text: str) -> dict:
             d[parts[0].strip().lower().replace("www.", "")] = parts[1].strip().lower()
     return d
 
+# Lingue valide ISO 639-1 — evitiamo falsi positivi come "us", "co", "de" dentro parole
+VALID_LANGS = {"it", "es", "de", "fr", "en", "pt", "nl", "pl", "ru", "zh", "ja", "ar"}
+
 def detect_language(url: str, domain_mapping: dict) -> str:
     p = urlparse(url)
     domain = p.netloc.lower().replace("www.", "")
+
+    # 1. Domain mapping esplicito (priorità massima)
     if domain in domain_mapping:
         return domain_mapping[domain]
-    path = p.path.lower()
-    m = re.search(r"/([a-z]{2})(?:/|$)", path)
-    if m:
-        return m.group(1)
-    if domain.endswith(".it"):   return "it"
-    if domain.endswith(".es"):   return "es"
-    if domain.endswith(".de"):   return "de"
-    if domain.endswith(".fr"):   return "fr"
+
+    # 2. TLD multi-parte prima (co.uk, co.jp, ecc.)
+    if domain.endswith(".co.uk"):  return "en"
+    if domain.endswith(".co.nz"):  return "en"
+    if domain.endswith(".co.au"):  return "en"
+
+    # 3. TLD semplice
+    if domain.endswith(".it"):  return "it"
+    if domain.endswith(".es"):  return "es"
+    if domain.endswith(".de"):  return "de"
+    if domain.endswith(".fr"):  return "fr"
+    if domain.endswith(".pt"):  return "pt"
+    if domain.endswith(".nl"):  return "nl"
+
+    # 4. Sottocartella lingua — solo PRIMO segmento del path e solo se lingua valida
+    #    Es: /it/prodotti → "it"   /contact-us → ignorato
+    parts = [s for s in p.path.lower().split("/") if s]
+    if parts and len(parts[0]) == 2 and parts[0] in VALID_LANGS:
+        return parts[0]
+
     return "en"
 
 def get_seo_content(row: pd.Series) -> str:
@@ -243,6 +260,19 @@ if old_files and new_files:
     df_old["lang"] = df_old["Address"].apply(lambda x: detect_language(x, d_mapping))
     df_new["lang"] = df_new["Address"].apply(lambda x: detect_language(x, d_mapping))
 
+    # ── DEBUG: mostra lingua rilevata per ogni URL ──────────────────────
+    with st.expander("🔍 Debug: Lingue rilevate (controlla qui se vedi errori)"):
+        tab_old, tab_new, tab_map = st.tabs(["Vecchio Sito", "Nuovo Sito", "Domain Map"])
+        with tab_old:
+            st.dataframe(df_old[["Address", "lang"]].head(50), use_container_width=True)
+        with tab_new:
+            st.dataframe(df_new[["Address", "lang"]].head(50), use_container_width=True)
+        with tab_map:
+            st.dataframe(
+                pd.DataFrame(list(d_mapping.items()), columns=["Dominio", "Lingua"]),
+                use_container_width=True
+            )
+
     # Anteprima dati
     with st.expander(f"👁️ Anteprima dati ({len(df_old)} vecchie URL · {len(df_new)} nuove URL)"):
         tab1, tab2 = st.tabs(["Vecchio Sito", "Nuovo Sito"])
@@ -292,10 +322,14 @@ if old_files and new_files:
             forced_lang = get_forced_lang(old_url, forced_mapping)
             match_lang  = forced_lang if forced_lang else old_lang
 
-            # Pool di destinazione: lingua forzata o stessa lingua, fallback → inglese
+            # Pool di destinazione: lingua forzata o stessa lingua
             pool_mask = df_new["lang"] == match_lang
             if not pool_mask.any():
+                # Fallback 1: inglese
                 pool_mask = df_new["lang"] == "en"
+            if not pool_mask.any():
+                # Fallback 2: qualsiasi lingua disponibile (mai lista vuota)
+                pool_mask = pd.Series([True] * len(df_new))
             pool_pos_idxs = np.where(pool_mask.values)[0].tolist()  # indici POSIZIONALI
 
             # Valori di default (usa match_lang per la home corretta)
