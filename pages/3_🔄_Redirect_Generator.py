@@ -29,6 +29,15 @@ with st.sidebar:
     )
 
     st.markdown("---")
+    st.subheader("🔀 Forza Domini → Lingua Destinazione")
+    st.caption("I domini qui elencati verranno sempre matchati nel pool della lingua indicata, ignorando la loro lingua originale.")
+    forced_domain_input = st.text_area(
+        "dominio:lingua_forzata (uno per riga)",
+        value="bossong-befestigungssysteme.de:en",
+        height=120,
+    )
+
+    st.markdown("---")
     st.subheader("🎚️ Soglie di Qualità")
     threshold_good = st.slider("✅ Match Confermato (verde)", 0.0, 1.0, 0.65)
     threshold_low  = st.slider("⚠️ Match Incerto (giallo)",  0.0, 1.0, 0.40)
@@ -141,6 +150,11 @@ def path_similarity_score(old_url: str, new_url: str) -> float:
     union        = old_parts | new_parts
     return len(intersection) / len(union)
 
+def get_forced_lang(url: str, forced_mapping: dict) -> str | None:
+    """Restituisce la lingua forzata per un dominio, se configurata."""
+    domain = urlparse(url).netloc.lower().replace("www.", "")
+    return forced_mapping.get(domain, None)
+
 def get_embeddings_batched(text_list: list, client: OpenAI) -> list:
     """Batch embeddings — minimizza le chiamate API."""
     all_embeddings = []
@@ -199,7 +213,8 @@ def load_sf_export(files) -> pd.DataFrame:
 # MOTORE PRINCIPALE
 # =========================
 if old_files and new_files:
-    d_mapping = get_domain_map(domain_map_input)
+    d_mapping      = get_domain_map(domain_map_input)
+    forced_mapping = get_domain_map(forced_domain_input)
 
     df_old_raw = load_sf_export(old_files)
     df_new_raw = load_sf_export(new_files)
@@ -273,8 +288,9 @@ if old_files and new_files:
             old_url  = old_row["Address"]
             old_lang = old_row["lang"]
 
-            # Pool di destinazione: stessa lingua, fallback → inglese
-            pool_mask = df_new["lang"] == old_lang
+            # Override lingua se il dominio è nella lista forzata
+            forced_lang = get_forced_lang(old_url, forced_mapping)
+            match_lang  = forced_lang if forced_lang else old_lang
             if not pool_mask.any():
                 pool_mask = df_new["lang"] == "en"
             pool_pos_idxs = np.where(pool_mask.values)[0].tolist()  # indici POSIZIONALI
@@ -286,7 +302,7 @@ if old_files and new_files:
 
             # ── Regola 0: Home del vecchio sito → Home del nuovo ──────────
             if urlparse(old_url).path.strip("/") == "":
-                best_url   = home_pages.get(old_lang, best_url)
+                best_url   = home_pages.get(match_lang, home_pages.get("en", best_url))
                 best_score = 1.0
                 method     = "Home → Home"
 
@@ -361,7 +377,7 @@ if old_files and new_files:
                 "Score":     round(best_score * 100, 1),   # numero, non stringa → ordinabile
                 "Flag":      flag(best_score, threshold_good, threshold_low),
                 "Method":    method,
-                "Lingua":    old_lang,
+                "Lingua":    f"{old_lang} → {match_lang}" if forced_lang else old_lang,
                 "Old Title": str(old_row.get("Title 1", "")),
                 "Old H1":    str(old_row.get("H1-1", "")),
             }
