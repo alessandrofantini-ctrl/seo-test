@@ -6,6 +6,8 @@ from docx import Document
 from io import BytesIO
 import json
 import re
+from pathlib import Path
+from datetime import datetime
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
@@ -23,6 +25,57 @@ MARKETS = {
     "🇫🇷 Francia": {"gl": "fr", "hl": "fr", "domain": "google.fr"},
     "🇩🇪 Germania": {"gl": "de", "hl": "de", "domain": "google.de"},
 }
+
+TONE_OPTIONS = ["Autorevole & tecnico", "Empatico & problem solving", "Diretto & commerciale"]
+
+# =========================
+# PROFILI CLIENTE
+# =========================
+PROFILES_PATH = Path("profiles/clients.json")
+
+def load_profiles() -> dict:
+    if PROFILES_PATH.exists():
+        try:
+            return json.loads(PROFILES_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+def save_profiles(profiles: dict):
+    PROFILES_PATH.parent.mkdir(exist_ok=True)
+    PROFILES_PATH.write_text(
+        json.dumps(profiles, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+def build_client_context(profile: dict) -> str:
+    """Costruisce il blocco testo cliente da iniettare nel prompt GPT."""
+    products_list = [
+        line.strip()
+        for line in profile.get("products_services", "").splitlines()
+        if line.strip()
+    ]
+    return "\n".join([
+        f"Cliente: {profile.get('name', '')}",
+        f"Settore: {profile.get('sector', '')}",
+        f"Zona geografica: {profile.get('geo', '')}",
+        f"Target audience: {profile.get('target_audience', '')}",
+        f"Prodotti/servizi offerti: {products_list}",
+        f"USP e punti di forza: {profile.get('usp', '')}",
+        f"Note strategiche: {profile.get('notes', '')}",
+        f"Keyword già usate per questo cliente: {profile.get('keyword_history', [])}",
+    ])
+
+def add_keyword_to_history(profile_name: str, keyword: str):
+    profiles = load_profiles()
+    if profile_name not in profiles:
+        return
+    history = profiles[profile_name].get("keyword_history", [])
+    if keyword not in history:
+        history.append(keyword)
+        profiles[profile_name]["keyword_history"] = history[-50:]
+        profiles[profile_name]["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        save_profiles(profiles)
 
 # =========================
 # HTTP SESSION + RETRY
@@ -141,9 +194,6 @@ def get_serp_data(query, api_key, gl, hl, domain):
 
 @st.cache_data(show_spinner=False, ttl=60 * 60)
 def scrape_site_content(url, include_meta=True, include_schema=True, max_text_chars=9000):
-    """
-    Estrae segnali SEO + contenuto competitor (testo ripulito, headings, liste).
-    """
     data = {
         "url": url,
         "domain": domain_of(url),
@@ -186,7 +236,6 @@ def scrape_site_content(url, include_meta=True, include_schema=True, max_text_ch
 
         main = detect_main_container(soup)
 
-        # headings
         for tag in main.find_all(["h1", "h2", "h3"])[:80]:
             txt = safe_text(tag.get_text(" ", strip=True))
             if not txt:
@@ -197,17 +246,13 @@ def scrape_site_content(url, include_meta=True, include_schema=True, max_text_ch
                 data["h2"].append(txt)
             elif tag.name == "h3" and len(data["h3"]) < 45:
                 data["h3"].append(txt)
-
             if "?" in txt:
                 data["question_headings"].append(txt)
 
-        # testo: paragrafi + liste
         paragraphs = main.find_all("p")
         lis = main.find_all("li")
-
         p_text = " ".join([safe_text(p.get_text(" ", strip=True)) for p in paragraphs])
         li_text = " ".join([safe_text(li.get_text(" ", strip=True)) for li in lis[:140]])
-
         text_content = safe_text((p_text + " " + li_text).strip())
         if len(text_content) > max_text_chars:
             text_content = text_content[:max_text_chars]
@@ -215,12 +260,10 @@ def scrape_site_content(url, include_meta=True, include_schema=True, max_text_ch
         data["word_count"] = len(text_content.split()) if text_content else 0
         data["text_sample"] = text_content[:2400]
 
-        # top terms
         toks = tokenize(text_content)
         common = Counter(toks).most_common(25)
         data["top_terms"] = [t for t, _ in common]
 
-        # schema
         if include_schema:
             jlds = extract_json_ld(soup)
             types = set()
@@ -245,12 +288,7 @@ def scrape_site_content(url, include_meta=True, include_schema=True, max_text_ch
         return None
 
 def build_serp_snapshot(serp_json, max_items):
-    snapshot = {
-        "organic": [],
-        "paa": [],
-        "related_searches": [],
-        "features": [],
-    }
+    snapshot = {"organic": [], "paa": [], "related_searches": [], "features": []}
     if not serp_json:
         return snapshot
 
@@ -262,27 +300,15 @@ def build_serp_snapshot(serp_json, max_items):
             "snippet": res.get("snippet") or res.get("snippet_highlighted_words"),
             "source": res.get("source"),
         })
-
     for q in serp_json.get("related_questions", [])[:20]:
         if q.get("question"):
             snapshot["paa"].append(q.get("question"))
-
     for r in serp_json.get("related_searches", [])[:20]:
         if r.get("query"):
             snapshot["related_searches"].append(r.get("query"))
-
-    if serp_json.get("answer_box"):
-        snapshot["features"].append("answer_box")
-    if serp_json.get("knowledge_graph"):
-        snapshot["features"].append("knowledge_graph")
-    if serp_json.get("shopping_results"):
-        snapshot["features"].append("shopping_results")
-    if serp_json.get("local_results"):
-        snapshot["features"].append("local_results")
-    if serp_json.get("top_stories"):
-        snapshot["features"].append("top_stories")
-    if serp_json.get("inline_videos"):
-        snapshot["features"].append("inline_videos")
+    for feature in ["answer_box", "knowledge_graph", "shopping_results", "local_results", "top_stories", "inline_videos"]:
+        if serp_json.get(feature):
+            snapshot["features"].append(feature)
 
     return snapshot
 
@@ -309,7 +335,6 @@ def create_docx_from_markdownish(content_md: str, kw: str):
 
 def aggregate_competitor_insights(competitors, target_lang):
     h2_all, terms_all, q_all = [], [], []
-
     for c in competitors:
         for h2 in c.get("h2", [])[:30]:
             h = safe_text(h2)
@@ -339,7 +364,6 @@ def aggregate_competitor_insights(competitors, target_lang):
 with st.sidebar:
     st.title("⚙️ SEO settings")
 
-    # BLOCCO CHIAVI (come richiesto)
     openai_api_key = st.text_input("OpenAI key", type="password")
     serp_api_key = st.text_input("SerpApi key", type="password")
     if not openai_api_key and "OPENAI_API_KEY" in st.secrets:
@@ -348,19 +372,57 @@ with st.sidebar:
         serp_api_key = st.secrets["SERP_API_KEY"]
 
     st.markdown("---")
+
+    # =========================
+    # SELEZIONE CLIENTE
+    # =========================
+    st.subheader("👤 Cliente")
+    profiles = load_profiles()
+    profile_names = ["— Nessun profilo —"] + list(profiles.keys())
+    selected_profile_name = st.selectbox("Seleziona cliente", profile_names)
+
+    if selected_profile_name != "— Nessun profilo —":
+        active_profile = profiles[selected_profile_name].copy()
+
+        # Riepilogo rapido
+        st.caption(f"**Settore:** {active_profile.get('sector', '—')}")
+        st.caption(f"**Tono:** {active_profile.get('tone_of_voice', '—')}")
+        kw_count = len(active_profile.get("keyword_history", []))
+        if kw_count:
+            st.caption(f"**Keyword usate:** {kw_count}")
+
+        # Prodotti in sola lettura
+        if active_profile.get("products_services"):
+            with st.expander("📦 Prodotti/servizi", expanded=False):
+                st.text(active_profile["products_services"])
+
+        # Storico keyword
+        if active_profile.get("keyword_history"):
+            with st.expander(f"📚 Ultime keyword usate", expanded=False):
+                for kw in reversed(active_profile["keyword_history"][-15:]):
+                    st.caption(f"• {kw}")
+
+        # Leggi valori dal profilo
+        brand_name    = active_profile.get("brand_name", "")
+        client_url    = active_profile.get("url", "")
+        custom_usp    = active_profile.get("usp", "")
+        tone_of_voice = active_profile.get("tone_of_voice", TONE_OPTIONS[0])
+
+    else:
+        active_profile = {}
+        # Campi manuali (comportamento originale)
+        st.markdown("---")
+        st.subheader("🏷️ Brand")
+        brand_name = st.text_input("Nome azienda/brand", placeholder="Es. Nome azienda")
+        st.subheader("🎯 Target cliente")
+        client_url    = st.text_input("URL sito cliente (opzionale)", placeholder="https://www.tuosito.it")
+        custom_usp    = st.text_area("USP / punti di forza (opzionale)", height=90)
+        tone_of_voice = st.selectbox("Tono di voce", TONE_OPTIONS)
+
+    st.markdown("---")
     st.subheader("🌍 Mercato")
     selected_market_label = st.selectbox("Seleziona mercato target", list(MARKETS.keys()))
     market_params = MARKETS[selected_market_label]
-
-    st.markdown("---")
-    st.subheader("🏷️ Brand")
-    brand_name = st.text_input("Nome azienda/brand (per meta title/description)", placeholder="Es. Nome azienda")
-
-    st.markdown("---")
-    st.subheader("🎯 Target cliente")
-    client_url = st.text_input("URL sito cliente (opzionale)", placeholder="https://www.tuosito.it")
-    custom_usp = st.text_area("USP / punti di forza (opzionale)", height=90)
-    tone_of_voice = st.selectbox("Tono di voce", ["Autorevole & tecnico", "Empatico & problem solving", "Diretto & commerciale"])
 
     st.markdown("---")
     st.subheader("🔑 Keyword secondarie (opzionale)")
@@ -383,7 +445,7 @@ with st.sidebar:
 # MAIN
 # =========================
 st.title("🚀 SEO brief generator multi-country")
-st.markdown(f"Analisi impostata su: **{selected_market_label}**")
+st.markdown(f"Analisi impostata su: **{selected_market_label}** · Cliente: **{selected_profile_name}**")
 
 col1, col2 = st.columns([3, 1])
 with col1:
@@ -423,27 +485,41 @@ if st.button("Avvia analisi"):
     with st.expander("SERP snapshot (debug)", expanded=False):
         st.json(serp_snapshot, expanded=2)
 
-    # 2) CLIENT (opzionale, light)
-    client_context = ""
-    if client_url:
-        status.write("🏢 Lettura sito cliente (light)…")
-        cd = scrape_site_content(client_url, include_meta=True, include_schema=False, max_text_chars=4000)
-        if cd:
-            client_context = (
-                f"Brand site title: {truncate_chars(cd.get('title',''), 120)}\n"
-                f"Brand meta description: {truncate_chars(cd.get('meta_description',''), 200)}\n"
-                f"Brand H1: {truncate_chars(cd.get('h1',''), 120)}\n"
-                f"Brand excerpt: {truncate_chars(cd.get('text_sample',''), 520)}"
-            )
-        else:
-            client_context = "Sito cliente non leggibile o bloccato."
+    # 2) CONTESTO CLIENTE
+    status.write("🏢 Preparazione contesto cliente…")
+
+    if active_profile:
+        # ✅ PROFILO SALVATO: usa tutti i dati strutturati
+        client_context = build_client_context(active_profile)
+        # Arricchimento opzionale con scraping live
+        if client_url:
+            cd = scrape_site_content(client_url, include_meta=True, include_schema=False, max_text_chars=4000)
+            if cd:
+                client_context += (
+                    f"\n\nEstratto live dal sito cliente:"
+                    f"\nTitle: {truncate_chars(cd.get('title', ''), 120)}"
+                    f"\nH1: {truncate_chars(cd.get('h1', ''), 120)}"
+                    f"\nTesto: {truncate_chars(cd.get('text_sample', ''), 600)}"
+                )
     else:
-        client_context = "Nessun sito cliente fornito."
+        # ⚠️ NESSUN PROFILO: modalità manuale (comportamento originale)
+        if client_url:
+            cd = scrape_site_content(client_url, include_meta=True, include_schema=False, max_text_chars=4000)
+            if cd:
+                client_context = (
+                    f"Brand site title: {truncate_chars(cd.get('title', ''), 120)}\n"
+                    f"Brand meta description: {truncate_chars(cd.get('meta_description', ''), 200)}\n"
+                    f"Brand H1: {truncate_chars(cd.get('h1', ''), 120)}\n"
+                    f"Brand excerpt: {truncate_chars(cd.get('text_sample', ''), 520)}"
+                )
+            else:
+                client_context = "Sito cliente non leggibile o bloccato."
+        else:
+            client_context = "Nessun sito cliente fornito."
+        if custom_usp:
+            client_context += f"\nUSP: {truncate_chars(custom_usp, 450)}"
 
-    if custom_usp:
-        client_context += f"\nUSP: {truncate_chars(custom_usp, 450)}"
-
-    # 3) SCRAPING COMPETITOR (contenuto reale)
+    # 3) SCRAPING COMPETITOR
     status.write("⚔️ Scraping competitor (contenuto reale)…")
     competitor_results = []
     prog = status.progress(0.0)
@@ -452,7 +528,6 @@ if st.button("Avvia analisi"):
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         for u in organic_urls:
             futures.append(ex.submit(scrape_site_content, u, include_meta, include_schema))
-
         done = 0
         for fut in as_completed(futures):
             done += 1
@@ -468,12 +543,10 @@ if st.button("Avvia analisi"):
         st.error("Non sono riuscito a leggere i competitor (403/timeout). Prova a ridurre competitor o parallelismo.")
         st.stop()
 
-    # 🔎 DEBUG COMPETITOR (come SERP snapshot)
     with st.expander("Competitor snapshot (debug)", expanded=False):
-        # ordina per presenza contenuto/word_count
         competitor_results_sorted = sorted(competitor_results, key=lambda x: x.get("word_count", 0), reverse=True)
         for c in competitor_results_sorted:
-            label = f"{c.get('domain','') or 'competitor'} — {truncate_chars(c.get('title',''), 70) or c.get('url','')}"
+            label = f"{c.get('domain', '') or 'competitor'} — {truncate_chars(c.get('title', ''), 70) or c.get('url', '')}"
             with st.expander(label, expanded=False):
                 debug_obj = {
                     "url": c.get("url"),
@@ -512,7 +585,7 @@ if st.button("Avvia analisi"):
         manual_secs = [safe_text(x) for x in secondary_keywords_manual.splitlines() if safe_text(x)]
         manual_secs = manual_secs[:25]
 
-    # 6) Prompt: outline H2/H3 obbligatorio
+    # 6) PROMPT
     status.write("🧠 Generazione brief…")
 
     brand = safe_text(brand_name) if brand_name else ""
@@ -531,7 +604,8 @@ if st.button("Avvia analisi"):
 
     system_prompt = (
         "Sei un Senior SEO strategist. Produci brief pratici e brevi, orientati all'esecuzione. "
-        "Non inserire teoria: solo ciò che serve per scrivere una pagina migliore dei competitor."
+        "Non inserire teoria: solo ciò che serve per scrivere una pagina migliore dei competitor. "
+        "Il brief deve essere costruito sui prodotti e servizi REALI del cliente, non su contenuti generici."
     )
 
     user_prompt = f"""
@@ -557,10 +631,10 @@ Pattern competitor:
 - Termini ricorrenti: {agg.get("top_terms", [])[:18]}
 - Domande ricorrenti: {agg.get("top_questions", [])}
 
-Contesto cliente:
+=== CONTESTO CLIENTE (PRIORITÀ MASSIMA) ===
 {client_context}
 
-REGOLE IMPORTANTI:
+=== REGOLE IMPORTANTI ===
 1) Output in ITALIANO per le istruzioni, ma meta title/description/H1/H2/H3 nella lingua target: {target_lang}.
 2) Maiuscole: sentence case per title/description/H1/H2/H3 (solo prima lettera maiuscola).
    Non mettere la maiuscola a ogni parola. Mantieni acronimi e brand corretti.
@@ -571,9 +645,13 @@ REGOLE IMPORTANTI:
 4) Meta description:
    - max 155 caratteri
    - 3 varianti (v1 informativa, v2 conversione, v3 ibrida)
-5) Output compatto: niente spiegoni.
+5) IMPORTANTE: ogni H2/H3 dell'outline deve essere rilevante per ciò che VENDE o FA il cliente.
+   Non suggerire sezioni generiche che il cliente non può coprire con i suoi prodotti/servizi reali.
+   Se il cliente vende prodotti specifici, citali per nome nell'outline dove pertinente.
+   Le CTA devono rispecchiare l'offerta reale del cliente.
+6) Output compatto: niente spiegoni.
 
-FORMATTO DI RISPOSTA (obbligatorio):
+FORMATO DI RISPOSTA (obbligatorio):
 ## meta
 - title (v1): ...
 - title (v2): ...
@@ -586,12 +664,12 @@ FORMATTO DI RISPOSTA (obbligatorio):
 - ...
 
 ## outline (H2/H3)
-Scrivi massimo 10 H2. Per ogni H2 scrivi 2–4 H3.
+Scrivi massimo 10 H2. Per ogni H2 scrivi 2-4 H3.
 Formato:
 - H2: ...
   - H3: ...
   - H3: ...
-  - Nota (IT): una riga su cosa inserire e quali prove/esempi usare.
+  - Nota (IT): una riga su cosa inserire e quali prove/esempi usare, ancorati ai prodotti/servizi del cliente.
 
 Integra PAA e correlate dove utile.
 
@@ -603,13 +681,13 @@ Integra PAA e correlate dove utile.
 5 domande (in {target_lang}) + risposta 1 frase (in {target_lang})
 
 ## cta
-3 CTA brevi (in italiano) coerenti con intento "{target_intent}"
+3 CTA brevi (in italiano) coerenti con intento "{target_intent}" e offerta del cliente
 
 {"## json\nIncludi un blocco JSON minimale (solo meta, h1, outline, secondary, faq) in ```json```." if include_json_block else ""}
 """
 
-    client = OpenAI(api_key=openai_api_key)
-    resp = client.chat.completions.create(
+    oai_client = OpenAI(api_key=openai_api_key)
+    resp = oai_client.chat.completions.create(
         model=model_name,
         messages=[
             {"role": "system", "content": system_prompt},
@@ -619,7 +697,11 @@ Integra PAA e correlate dove utile.
     )
     output = resp.choices[0].message.content
 
-    status.update(label="Brief pronto!", state="complete", expanded=False)
+    status.update(label="✅ Brief pronto!", state="complete", expanded=False)
+
+    # Aggiorna storico keyword nel profilo cliente
+    if selected_profile_name != "— Nessun profilo —":
+        add_keyword_to_history(selected_profile_name, keyword)
 
     st.markdown(output)
 
@@ -627,7 +709,7 @@ Integra PAA e correlate dove utile.
     st.download_button(
         "📥 Scarica brief .docx",
         docx,
-        f"brief_{keyword.replace(' ','_')}.docx"
+        f"brief_{keyword.replace(' ', '_')}.docx"
     )
 
     json_match = re.search(r"```json\s*(\{.*?\})\s*```", output, flags=re.S)
@@ -637,7 +719,7 @@ Integra PAA e correlate dove utile.
             st.download_button(
                 "📥 Scarica brief JSON",
                 data=json.dumps(parsed, ensure_ascii=False, indent=2).encode("utf-8"),
-                file_name=f"brief_{keyword.replace(' ','_')}.json",
+                file_name=f"brief_{keyword.replace(' ', '_')}.json",
                 mime="application/json"
             )
         except Exception:
