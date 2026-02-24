@@ -6,6 +6,13 @@ from datetime import datetime
 from openai import OpenAI
 from utils.scraper import scrape_client_deep
 
+import requests
+r = requests.get("https://raw.githubusercontent.com/alessandrofantini-ctrl/seo-test/main/profiles/clients.json", timeout=10)
+st.write("Status:", r.status_code)
+st.write("Encoding:", r.encoding)
+st.write("Content-Type:", r.headers.get("content-type"))
+st.code(r.text[:500])
+
 # =========================
 # CONFIG
 # =========================
