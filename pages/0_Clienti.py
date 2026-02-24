@@ -5,43 +5,46 @@ import requests
 from datetime import datetime
 from openai import OpenAI
 from utils.scraper import scrape_client_deep
-from utils.helpers import safe_text
 
 # =========================
-# CONFIG PAGINA
+# CONFIG
 # =========================
 st.set_page_config(page_title="Gestione Clienti | SEO Brief", layout="wide", page_icon="👤")
 
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/alessandrofantini-ctrl/seo-test/main/profiles/clients.json"
-
 TONE_OPTIONS = ["Autorevole & tecnico", "Empatico & problem solving", "Diretto & commerciale"]
 
 # =========================
-# LOAD / SAVE (sessione + GitHub)
+# FUNZIONI PROFILI
 # =========================
-@st.cache_data(show_spinner=False, ttl=30)
-def load_profiles_github() -> dict:
-    """Legge il JSON da GitHub (sola lettura, cached 30s)."""
+def load_profiles_from_github() -> dict:
     try:
         r = requests.get(GITHUB_RAW_URL, timeout=10)
         if r.status_code == 200:
             return r.json()
-    except Exception:
-        pass
-    return {}
+        else:
+            st.error(f"Errore GitHub: status {r.status_code}")
+            return {}
+    except Exception as e:
+        st.error(f"Errore connessione GitHub: {e}")
+        return {}
 
 def get_profiles() -> dict:
-    """
-    Fonte unica di verità: usa la versione in sessione se esiste,
-    altrimenti carica da GitHub.
-    """
-    if "profiles_session" not in st.session_state:
-        st.session_state["profiles_session"] = load_profiles_github()
-    return st.session_state["profiles_session"]
+    if "profiles_data" not in st.session_state:
+        st.session_state["profiles_data"] = load_profiles_from_github()
+    return st.session_state["profiles_data"]
 
 def set_profiles(profiles: dict):
-    """Salva i profili in sessione (non su GitHub)."""
-    st.session_state["profiles_session"] = profiles
+    st.session_state["profiles_data"] = profiles
+
+def empty_profile() -> dict:
+    return {
+        "name": "", "url": "", "sector": "", "brand_name": "",
+        "tone_of_voice": "Autorevole & tecnico", "usp": "",
+        "products_services": "", "target_audience": "", "geo": "",
+        "notes": "", "keyword_history": [],
+        "created_at": "", "updated_at": "",
+    }
 
 def build_client_context(profile: dict) -> str:
     products_list = [
@@ -60,58 +63,49 @@ def build_client_context(profile: dict) -> str:
         f"Keyword già usate: {profile.get('keyword_history', [])}",
     ])
 
-def empty_profile() -> dict:
-    return {
-        "name": "", "url": "", "sector": "", "brand_name": "",
-        "tone_of_voice": "Autorevole & tecnico", "usp": "",
-        "products_services": "", "target_audience": "", "geo": "",
-        "notes": "", "keyword_history": [],
-        "created_at": "", "updated_at": "",
-    }
-
 # =========================
-# AUTO-GENERAZIONE PROFILO DA URL
+# AUTO-GENERAZIONE DA URL
 # =========================
 def generate_profile_from_url(base_url: str, client: OpenAI, model: str) -> dict:
     with st.spinner("Analizzo il sito... (15-30 secondi)"):
         pages_data = scrape_client_deep(base_url, keyword="", max_pages=6)
 
     if not pages_data:
-        st.warning("Non ho trovato contenuto sufficiente. Compila i campi manualmente.")
+        st.warning("Contenuto insufficiente. Compila manualmente.")
         return {}
 
     all_text_parts = []
     for label, page in pages_data:
-        h2_str = str(page.get("h2s", []))
-        snippet = f"[{label}]\nTitle: {page.get('title','')}\nH1: {page.get('h1','')}\nH2: {h2_str}\n{page.get('text','')[:1200]}"
+        snippet = f"[{label}]\nTitle: {page.get('title','')}\nH1: {page.get('h1','')}\nH2: {str(page.get('h2s', []))}\n{page.get('text','')[:1200]}"
         all_text_parts.append(snippet)
 
     combined_text = "\n\n---\n\n".join(all_text_parts)
-    system = "Sei un esperto SEO e analista di business. Estrai informazioni strutturate da testi di siti web aziendali."
-    prompt = f"""
-Analizza il contenuto di questo sito web e restituisci SOLO un oggetto JSON valido con questa struttura esatta:
+    prompt = f"""Analizza il contenuto di questo sito web e restituisci SOLO un oggetto JSON valido:
 
 {{
   "name": "nome azienda/brand",
   "sector": "settore di attività",
   "brand_name": "nome brand commerciale",
-  "products_services": "lista prodotti/servizi separati da newline, uno per riga",
-  "usp": "punti di forza e differenziatori principali in 2-3 frasi",
-  "target_audience": "descrizione del cliente tipo",
-  "geo": "zona geografica di operatività",
+  "products_services": "prodotti/servizi uno per riga",
+  "usp": "punti di forza in 2-3 frasi",
+  "target_audience": "cliente tipo",
+  "geo": "zona geografica",
   "tone_of_voice": "uno tra: Autorevole & tecnico | Empatico & problem solving | Diretto & commerciale",
-  "notes": "eventuali note strategiche SEO utili (max 2 frasi)"
+  "notes": "note strategiche SEO (max 2 frasi)"
 }}
 
-Contenuto sito:
+Contenuto:
 {combined_text[:6000]}
 
-Rispondi SOLO con il JSON, senza markdown, senza spiegazioni.
-"""
+Rispondi SOLO con il JSON."""
+
     try:
         resp = client.chat.completions.create(
             model=model,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": "Sei un esperto SEO. Estrai informazioni strutturate da siti web."},
+                {"role": "user", "content": prompt}
+            ],
             temperature=0.2
         )
         raw = resp.choices[0].message.content.strip()
@@ -133,61 +127,50 @@ with st.sidebar:
     model_name = st.selectbox("Modello", ["gpt-4o", "gpt-4o-mini"], index=0)
 
     st.markdown("---")
-
-    # === DOWNLOAD JSON (da caricare su GitHub) ===
-    profiles_now = get_profiles()
     st.subheader("💾 Salva su GitHub")
-    st.caption("Dopo aver modificato i profili, scarica il JSON e caricalo su GitHub.")
+    st.caption("Modifica i profili → scarica → carica su GitHub")
+
+    profiles_sidebar = get_profiles()
     st.download_button(
         label="📥 Scarica clients.json",
-        data=json.dumps(profiles_now, ensure_ascii=False, indent=2).encode("utf-8"),
+        data=json.dumps(profiles_sidebar, ensure_ascii=False, indent=2).encode("utf-8"),
         file_name="clients.json",
         mime="application/json",
         use_container_width=True,
         type="primary",
     )
-    st.caption("→ Caricalo in `profiles/clients.json` sul repo GitHub")
+    st.caption("Carica il file in `profiles/clients.json` su GitHub")
 
     st.markdown("---")
-
-    # === RICARICA DA GITHUB ===
     if st.button("🔄 Ricarica da GitHub", use_container_width=True):
-        load_profiles_github.clear()
-        if "profiles_session" in st.session_state:
-            del st.session_state["profiles_session"]
-        st.success("Profili ricaricati da GitHub.")
+        if "profiles_data" in st.session_state:
+            del st.session_state["profiles_data"]
+        st.success("Ricaricato!")
         st.rerun()
 
-    st.markdown("---")
-
-    # === IMPORT JSON ===
-    st.subheader("📥 Importa JSON")
-    uploaded = st.file_uploader("Carica un clients.json", type="json")
-    if uploaded:
-        try:
-            imported = json.loads(uploaded.read())
-            existing = get_profiles()
-            existing.update(imported)
-            set_profiles(existing)
-            st.success(f"✅ Importati {len(imported)} profili in sessione.")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Errore: {e}")
-
 # =========================
-# TITOLO
+# TITOLO + DIAGNOSTICA
 # =========================
 st.title("👤 Gestione profili cliente")
 
-# Banner workflow
-st.info(
-    "**Workflow:** Modifica i profili qui sotto → clicca **Scarica clients.json** nel sidebar "
-    "→ carica il file su GitHub in `profiles/clients.json` → l'app lo rileggerà automaticamente.",
-    icon="ℹ️"
-)
+# Test connessione GitHub in tempo reale
+with st.spinner("Verifica connessione GitHub..."):
+    try:
+        test = requests.get(GITHUB_RAW_URL, timeout=5)
+        if test.status_code == 200:
+            data = test.json()
+            st.success(f"✅ GitHub raggiungibile · {len(data)} profili nel file")
+        elif test.status_code == 404:
+            st.error("❌ File `profiles/clients.json` non trovato su GitHub. Crealo con contenuto `{}`")
+        else:
+            st.error(f"❌ GitHub risponde con status {test.status_code}")
+    except Exception as e:
+        st.error(f"❌ Impossibile raggiungere GitHub: {e}")
+
+st.info("**Workflow:** Modifica profili → Scarica JSON (sidebar) → Carica su GitHub → L'app rilegge automaticamente", icon="ℹ️")
 
 # =========================
-# LAYOUT PRINCIPALE
+# LAYOUT
 # =========================
 profiles = get_profiles()
 col_list, col_detail = st.columns([1, 2], gap="large")
@@ -197,7 +180,7 @@ with col_list:
     st.subheader(f"📋 Clienti ({len(profiles)})")
 
     if not profiles:
-        st.info("Nessun profilo. Crea il primo cliente →")
+        st.warning("Nessun profilo trovato. Verifica che `profiles/clients.json` esista su GitHub oppure crea il primo cliente.")
     else:
         search = st.text_input("🔍 Cerca", placeholder="Nome o settore...")
         filtered = {
@@ -213,7 +196,7 @@ with col_list:
                     c1, c2 = st.columns([3, 1])
                     with c1:
                         st.markdown(f"**{name}**")
-                        st.caption(f"{profile.get('sector','—')} · {kw_count} keyword")
+                        st.caption(f"{profile.get('sector', '—')} · {kw_count} keyword")
                     with c2:
                         if st.button("Apri", key=f"open_{name}", use_container_width=True):
                             st.session_state["selected_client"] = name
@@ -227,23 +210,21 @@ with col_list:
         st.session_state["prefilled_profile"] = empty_profile()
         st.rerun()
 
-# --- DETTAGLIO / FORM ---
+# --- DETTAGLIO ---
 with col_detail:
     mode = st.session_state.get("client_mode", None)
     selected_client = st.session_state.get("selected_client", None)
 
-    # ===== NESSUNA SELEZIONE =====
     if mode is None:
         st.markdown("### Seleziona un cliente o creane uno nuovo")
         st.markdown("""
-        **Come funziona:**
-        1. Crea o modifica un profilo cliente
-        2. Scarica il `clients.json` dal sidebar
-        3. Caricalo su GitHub in `profiles/clients.json`
-        4. L'app lo rilegge automaticamente in tutti gli strumenti
+        **Come funziona il salvataggio:**
+        1. Crea o modifica un profilo → viene salvato in sessione
+        2. Clicca **Scarica clients.json** nel sidebar
+        3. Carica il file su GitHub in `profiles/clients.json`
+        4. L'app lo rilegge in tutti gli strumenti
         """)
 
-    # ===== NUOVO CLIENTE =====
     elif mode == "new":
         st.subheader("➕ Nuovo profilo cliente")
 
@@ -259,14 +240,14 @@ with col_detail:
                 if not auto_url:
                     st.error("Inserisci un URL.")
                 elif not openai_api_key:
-                    st.error("Inserisci la OpenAI key nel sidebar.")
+                    st.error("Inserisci la OpenAI key.")
                 else:
                     oai_client = OpenAI(api_key=openai_api_key)
                     extracted = generate_profile_from_url(auto_url, oai_client, model_name)
                     if extracted:
                         pf = {**empty_profile(), **extracted, "url": auto_url}
                         st.session_state["prefilled_profile"] = pf
-                        st.success("✅ Profilo pre-compilato! Rivedi i campi e salva.")
+                        st.success("✅ Pre-compilato! Rivedi e salva.")
                         st.rerun()
 
         pf = st.session_state.get("prefilled_profile", empty_profile())
@@ -277,34 +258,31 @@ with col_detail:
 
         with st.form("form_new_client"):
             new_name = st.text_input("Nome identificativo *", value=pf.get("name", ""), placeholder="Es. Rossi Impianti Srl")
-            new_url = st.text_input("URL sito", value=pf.get("url", ""))
+            new_url  = st.text_input("URL sito", value=pf.get("url", ""))
             col_a, col_b = st.columns(2)
             with col_a:
-                new_sector = st.text_input("Settore", value=pf.get("sector", ""))
-                new_brand = st.text_input("Brand name", value=pf.get("brand_name", ""))
-                new_geo = st.text_input("Zona geografica", value=pf.get("geo", ""))
+                new_sector   = st.text_input("Settore", value=pf.get("sector", ""))
+                new_brand    = st.text_input("Brand name", value=pf.get("brand_name", ""))
+                new_geo      = st.text_input("Zona geografica", value=pf.get("geo", ""))
             with col_b:
-                new_tone = st.selectbox("Tono di voce", TONE_OPTIONS, index=tone_idx)
+                new_tone     = st.selectbox("Tono di voce", TONE_OPTIONS, index=tone_idx)
                 new_audience = st.text_input("Target audience", value=pf.get("target_audience", ""))
+            new_products = st.text_area("Prodotti / Servizi *", value=pf.get("products_services", ""), height=150,
+                                        placeholder="Un prodotto/servizio per riga")
+            new_usp      = st.text_area("USP / Punti di forza", value=pf.get("usp", ""), height=80)
+            new_notes    = st.text_area("Note strategiche SEO", value=pf.get("notes", ""), height=80)
 
-            new_products = st.text_area(
-                "Prodotti / Servizi *", value=pf.get("products_services", ""), height=150,
-                placeholder="Es:\nImpianti fotovoltaici industriali\nQuadri elettrici BT/MT"
-            )
-            new_usp = st.text_area("USP / Punti di forza", value=pf.get("usp", ""), height=90)
-            new_notes = st.text_area("Note strategiche SEO", value=pf.get("notes", ""), height=80)
-
-            col_save, col_cancel = st.columns(2)
-            with col_save:
+            col_s, col_c = st.columns(2)
+            with col_s:
                 submitted = st.form_submit_button("✅ Salva in sessione", type="primary", use_container_width=True)
-            with col_cancel:
+            with col_c:
                 cancelled = st.form_submit_button("❌ Annulla", use_container_width=True)
 
         if submitted:
             if not new_name:
-                st.error("Il nome identificativo è obbligatorio.")
+                st.error("Il nome è obbligatorio.")
             elif new_name in profiles:
-                st.error(f"Esiste già un profilo con nome '{new_name}'.")
+                st.error(f"Esiste già un profilo '{new_name}'.")
             else:
                 profiles[new_name] = {
                     "name": new_name, "url": new_url, "sector": new_sector,
@@ -319,14 +297,13 @@ with col_detail:
                 st.session_state["prefilled_profile"] = empty_profile()
                 st.session_state["selected_client"] = new_name
                 st.session_state["client_mode"] = "edit"
-                st.success(f"✅ '{new_name}' salvato in sessione. Ricorda di scaricare e caricare il JSON su GitHub!")
+                st.success(f"✅ '{new_name}' salvato in sessione. **Scarica il JSON e caricalo su GitHub!**")
                 st.rerun()
 
         if cancelled:
             st.session_state["client_mode"] = None
             st.rerun()
 
-    # ===== MODIFICA CLIENTE =====
     elif mode == "edit" and selected_client and selected_client in profiles:
         profile = profiles[selected_client]
 
@@ -348,7 +325,7 @@ with col_detail:
                     st.session_state["selected_client"] = None
                     st.session_state["client_mode"] = None
                     st.session_state["confirm_delete"] = False
-                    st.success("Eliminato dalla sessione. Scarica e carica il JSON su GitHub.")
+                    st.success("Eliminato. Scarica e carica il JSON su GitHub.")
                     st.rerun()
             with c2:
                 if st.button("❌ Annulla", use_container_width=True):
@@ -381,7 +358,7 @@ with col_detail:
                                     profile[k] = v
                             profile["url"] = regen_url or profile.get("url", "")
                             st.session_state["regen_data"] = profile
-                            st.success("✅ Dati aggiornati! Salva le modifiche.")
+                            st.success("✅ Aggiornato! Salva le modifiche.")
                             st.rerun()
 
             regen = st.session_state.get("regen_data", {})
@@ -389,19 +366,18 @@ with col_detail:
                 profile = {**profile, **regen}
 
             with st.form("form_edit_client"):
-                e_url = st.text_input("URL sito", value=profile.get("url", ""))
+                e_url      = st.text_input("URL sito", value=profile.get("url", ""))
                 col_a, col_b = st.columns(2)
                 with col_a:
-                    e_sector = st.text_input("Settore", value=profile.get("sector", ""))
-                    e_brand = st.text_input("Brand name", value=profile.get("brand_name", ""))
-                    e_geo = st.text_input("Zona geografica", value=profile.get("geo", ""))
+                    e_sector   = st.text_input("Settore", value=profile.get("sector", ""))
+                    e_brand    = st.text_input("Brand name", value=profile.get("brand_name", ""))
+                    e_geo      = st.text_input("Zona geografica", value=profile.get("geo", ""))
                 with col_b:
-                    e_tone = st.selectbox("Tono di voce", TONE_OPTIONS, index=tone_idx)
+                    e_tone     = st.selectbox("Tono di voce", TONE_OPTIONS, index=tone_idx)
                     e_audience = st.text_input("Target audience", value=profile.get("target_audience", ""))
-
                 e_products = st.text_area("Prodotti / Servizi", value=profile.get("products_services", ""), height=150)
-                e_usp = st.text_area("USP / Punti di forza", value=profile.get("usp", ""), height=90)
-                e_notes = st.text_area("Note strategiche SEO", value=profile.get("notes", ""), height=80)
+                e_usp      = st.text_area("USP / Punti di forza", value=profile.get("usp", ""), height=80)
+                e_notes    = st.text_area("Note strategiche SEO", value=profile.get("notes", ""), height=80)
 
                 save_edit = st.form_submit_button("💾 Salva in sessione", type="primary", use_container_width=True)
 
@@ -415,7 +391,7 @@ with col_detail:
                 })
                 set_profiles(profiles)
                 st.session_state.pop("regen_data", None)
-                st.success("✅ Salvato in sessione. Ricorda di scaricare e caricare il JSON su GitHub!")
+                st.success("✅ Salvato in sessione. **Scarica il JSON e caricalo su GitHub!**")
                 st.rerun()
 
         with tab_history:
