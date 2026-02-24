@@ -21,7 +21,7 @@ def load_profiles_from_github() -> dict:
     try:
         r = requests.get(GITHUB_RAW_URL, timeout=10)
         if r.status_code == 200:
-            return r.json()
+            return json.loads(r.content.decode("utf-8"))
         else:
             st.error(f"Errore GitHub: status {r.status_code}")
             return {}
