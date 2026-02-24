@@ -15,12 +15,15 @@ except Exception:
 
 st.title("✨ Lumi Company AI Suite")
 st.markdown("### Gli strumenti ufficiali per la strategia SEO di [www.lumicompany.it](https://www.lumicompany.it)")
-
 st.markdown("---")
 
 # --- MENU DI NAVIGAZIONE VISUALE ---
 st.markdown("""
 Benvenuto nella dashboard operativa. Seleziona uno strumento dal menu laterale o usa i link rapidi qui sotto:
+
+#### 0️⃣ 👤 **[Gestione Clienti](/Clienti)**
+_Il punto di partenza._ Crea e gestisci i **profili dei tuoi clienti**: prodotti, servizi, USP e tono di voce.
+Ogni profilo viene caricato automaticamente negli strumenti, senza dover reinserire i dati ogni volta.
 
 #### 1️⃣ 🔎 **[Analisi & Strategia SEO](/Analisi_SEO)**
 _Il primo passo._ Analizza le keyword, studia i competitor e crea il **Brief editoriale** per posizionarti su Google.
@@ -41,8 +44,7 @@ _Per le migrazioni._ Mappa redirect 301, gestisce le lingue e crea file Excel pr
 """)
 
 # --- FOOTER ---
-st.info("💡 Workflow consigliato: Analisi SEO → Redazione articolo → Internal linking. Usa il Redirect assistant solo in fase di restyling o migrazione.")
-
+st.info("💡 Workflow consigliato: Gestione Clienti → Analisi SEO → Redazione articolo → Internal linking. Usa il Redirect assistant solo in fase di restyling o migrazione.")
 st.markdown(
     """
     <div style='text-align: center; color: grey; font-size: small;'>
