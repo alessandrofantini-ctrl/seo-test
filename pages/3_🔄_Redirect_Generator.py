@@ -110,24 +110,26 @@ def detect_language(url: str, domain_mapping: dict, root_lang: str = "en") -> st
     if domain in domain_mapping:
         return domain_mapping[domain]
 
-    # 2. TLD multi-parte prima (co.uk, co.jp, ecc.)
+    # 2. Sottocartella lingua — solo PRIMO segmento del path e solo se lingua valida
+    #    Es: /fr/produits → "fr"   /contact-us → ignorato
+    #    Ha priorità sul TLD perché un sito multilingua (es: ghidini-gb.it/fr) usa
+    #    il path per indicare la lingua specifica della pagina.
+    parts = [s for s in p.path.lower().split("/") if s]
+    if parts and len(parts[0]) == 2 and parts[0] in VALID_LANGS:
+        return parts[0]
+
+    # 3. TLD multi-parte prima (co.uk, co.jp, ecc.)
     if domain.endswith(".co.uk"):  return "en"
     if domain.endswith(".co.nz"):  return "en"
     if domain.endswith(".co.au"):  return "en"
 
-    # 3. TLD semplice
+    # 4. TLD semplice
     if domain.endswith(".it"):  return "it"
     if domain.endswith(".es"):  return "es"
     if domain.endswith(".de"):  return "de"
     if domain.endswith(".fr"):  return "fr"
     if domain.endswith(".pt"):  return "pt"
     if domain.endswith(".nl"):  return "nl"
-
-    # 4. Sottocartella lingua — solo PRIMO segmento del path e solo se lingua valida
-    #    Es: /en/products → "en"   /contact-us → ignorato (root_lang)
-    parts = [s for s in p.path.lower().split("/") if s]
-    if parts and len(parts[0]) == 2 and parts[0] in VALID_LANGS:
-        return parts[0]
 
     # 5. Nessun segnale trovato → lingua della root (configurabile)
     return root_lang
