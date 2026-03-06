@@ -182,11 +182,21 @@ def get_seo_content(row: pd.Series) -> str:
     )[:8000]
 
 def normalize_path_segments(url: str) -> set:
-    """Estrae segmenti di path puliti per il match basato su struttura URL."""
+    """Estrae token di path per il match strutturale.
+    Divide ogni segmento nei singoli termini per catturare overlap parziali.
+    Es: 'ambria-17' → {'ambria 17', 'ambria'} che matcha con 'ambria' nel nuovo sito."""
     path = urlparse(url).path.lower()
-    parts = {s.replace("-", " ").replace("_", " ")
-             for s in path.split("/") if len(s) > 2}
-    return parts
+    tokens = set()
+    for seg in path.split("/"):
+        if not seg:
+            continue
+        normalized = seg.replace("-", " ").replace("_", " ").strip()
+        if len(normalized) > 2:
+            tokens.add(normalized)              # segmento intero: "ambria 17"
+        for word in normalized.split():
+            if len(word) > 2:
+                tokens.add(word)               # parola singola: "ambria"
+    return tokens
 
 def path_similarity_score(old_url: str, new_url: str) -> float:
     """Jaccard similarity sui segmenti di path — gratuita, molto efficace per e-commerce."""
