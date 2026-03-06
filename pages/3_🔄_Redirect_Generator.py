@@ -48,11 +48,15 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("🎯 Vincola Dominio Vecchio → Dominio Nuovo")
-    st.caption("Gli URL del dominio vecchio verranno matchati esclusivamente contro gli URL del dominio nuovo specificato. Utile quando hai più siti separati che migrano su domini distinti.")
+    st.caption(
+        "Specifica su quale nuovo dominio deve puntare un vecchio dominio (o una sua lingua specifica). "
+        "Formato: `vecchio_dominio:nuovo_dominio` oppure `vecchio_dominio/lingua:nuovo_dominio` per un vincolo per-lingua. "
+        "Esempio: `ghidini-gb.it:ghidinigben.coridemo.com` oppure `ghidini-gb.it/fr:ghidinigbfr.coridemo.com`"
+    )
     domain_target_input = st.text_area(
-        "vecchio_dominio:nuovo_dominio (uno per riga)",
+        "vecchio_dominio[:lingua]:nuovo_dominio (uno per riga)",
         value="",
-        placeholder="ghidini-gb.it:ghidinigben.coridemo.com",
+        placeholder="ghidini-gb.it:ghidinigben.coridemo.com\nghidini-gb.it/fr:ghidinigbfr.coridemo.com",
         height=120,
     )
 
@@ -194,10 +198,12 @@ def get_forced_lang(url: str, forced_mapping: dict) -> str | None:
     domain = urlparse(url).netloc.lower().replace("www.", "")
     return forced_mapping.get(domain, None)
 
-def get_target_domain(url: str, domain_target_mapping: dict) -> str | None:
-    """Restituisce il dominio di destinazione forzato per un vecchio dominio, se configurato."""
+def get_target_domain(url: str, lang: str, domain_target_mapping: dict) -> str | None:
+    """Restituisce il dominio di destinazione forzato.
+    Cerca prima la chiave specifica 'dominio/lingua' (override per-lingua),
+    poi il catch-all 'dominio' (override per l'intero dominio)."""
     domain = urlparse(url).netloc.lower().replace("www.", "")
-    return domain_target_mapping.get(domain, None)
+    return domain_target_mapping.get(f"{domain}/{lang}") or domain_target_mapping.get(domain, None)
 
 def get_embeddings_batched(text_list: list, client: OpenAI) -> list:
     """Batch embeddings — minimizza le chiamate API."""
@@ -351,7 +357,8 @@ if old_files and new_files:
             match_lang  = forced_lang if forced_lang else old_lang
 
             # Vincolo dominio: se configurato, restringe il pool solo agli URL del nuovo dominio
-            target_domain = get_target_domain(old_url, domain_target_mapping)
+            # Cerca prima 'dominio/lingua' (specifico per lingua), poi 'dominio' (catch-all)
+            target_domain = get_target_domain(old_url, match_lang, domain_target_mapping)
 
             # Pool di destinazione: lingua forzata o stessa lingua
             pool_mask = df_new["lang"] == match_lang
