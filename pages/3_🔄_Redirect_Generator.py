@@ -119,8 +119,16 @@ VALID_LANGS = {"it", "es", "de", "fr", "en", "pt", "nl", "pl", "ru", "zh", "ja",
 def detect_language(url: str, domain_mapping: dict, root_lang: str = "en") -> str:
     p = urlparse(url)
     domain = p.netloc.lower().replace("www.", "")
+    parts = [s for s in p.path.lower().split("/") if s]
 
-    # 1. Domain mapping esplicito (priorità massima)
+    # 1a. Chiave specifica dominio/prima-lingua-nel-path (priorità massima)
+    #     Es: ghidini-gb.it/de → restituisce "de" anche se ghidini-gb.it → "it" è configurato
+    if parts and len(parts[0]) == 2 and parts[0] in VALID_LANGS:
+        domain_lang_key = f"{domain}/{parts[0]}"
+        if domain_lang_key in domain_mapping:
+            return domain_mapping[domain_lang_key]
+
+    # 1b. Domain mapping generico
     if domain in domain_mapping:
         return domain_mapping[domain]
 
@@ -128,7 +136,6 @@ def detect_language(url: str, domain_mapping: dict, root_lang: str = "en") -> st
     #    Es: /fr/produits → "fr"   /contact-us → ignorato
     #    Ha priorità sul TLD perché un sito multilingua (es: ghidini-gb.it/fr) usa
     #    il path per indicare la lingua specifica della pagina.
-    parts = [s for s in p.path.lower().split("/") if s]
     if parts and len(parts[0]) == 2 and parts[0] in VALID_LANGS:
         return parts[0]
 
