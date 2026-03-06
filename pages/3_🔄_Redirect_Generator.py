@@ -47,6 +47,16 @@ with st.sidebar:
     )
 
     st.markdown("---")
+    st.subheader("🎯 Vincola Dominio Vecchio → Dominio Nuovo")
+    st.caption("Gli URL del dominio vecchio verranno matchati esclusivamente contro gli URL del dominio nuovo specificato. Utile quando hai più siti separati che migrano su domini distinti.")
+    domain_target_input = st.text_area(
+        "vecchio_dominio:nuovo_dominio (uno per riga)",
+        value="",
+        placeholder="ghidini-gb.it:ghidinigben.coridemo.com",
+        height=120,
+    )
+
+    st.markdown("---")
     st.subheader("🎚️ Soglie di Qualità")
     threshold_good = st.slider("✅ Match Confermato (verde)", 0.0, 1.0, 0.65)
     threshold_low  = st.slider("⚠️ Match Incerto (giallo)",  0.0, 1.0, 0.40)
@@ -110,24 +120,26 @@ def detect_language(url: str, domain_mapping: dict, root_lang: str = "en") -> st
     if domain in domain_mapping:
         return domain_mapping[domain]
 
-    # 2. TLD multi-parte prima (co.uk, co.jp, ecc.)
+    # 2. Sottocartella lingua — solo PRIMO segmento del path e solo se lingua valida
+    #    Es: /fr/produits → "fr"   /contact-us → ignorato
+    #    Ha priorità sul TLD perché un sito multilingua (es: ghidini-gb.it/fr) usa
+    #    il path per indicare la lingua specifica della pagina.
+    parts = [s for s in p.path.lower().split("/") if s]
+    if parts and len(parts[0]) == 2 and parts[0] in VALID_LANGS:
+        return parts[0]
+
+    # 3. TLD multi-parte prima (co.uk, co.jp, ecc.)
     if domain.endswith(".co.uk"):  return "en"
     if domain.endswith(".co.nz"):  return "en"
     if domain.endswith(".co.au"):  return "en"
 
-    # 3. TLD semplice
+    # 4. TLD semplice
     if domain.endswith(".it"):  return "it"
     if domain.endswith(".es"):  return "es"
     if domain.endswith(".de"):  return "de"
     if domain.endswith(".fr"):  return "fr"
     if domain.endswith(".pt"):  return "pt"
     if domain.endswith(".nl"):  return "nl"
-
-    # 4. Sottocartella lingua — solo PRIMO segmento del path e solo se lingua valida
-    #    Es: /en/products → "en"   /contact-us → ignorato (root_lang)
-    parts = [s for s in p.path.lower().split("/") if s]
-    if parts and len(parts[0]) == 2 and parts[0] in VALID_LANGS:
-        return parts[0]
 
     # 5. Nessun segnale trovato → lingua della root (configurabile)
     return root_lang
@@ -181,6 +193,11 @@ def get_forced_lang(url: str, forced_mapping: dict) -> str | None:
     """Restituisce la lingua forzata per un dominio, se configurata."""
     domain = urlparse(url).netloc.lower().replace("www.", "")
     return forced_mapping.get(domain, None)
+
+def get_target_domain(url: str, domain_target_mapping: dict) -> str | None:
+    """Restituisce il dominio di destinazione forzato per un vecchio dominio, se configurato."""
+    domain = urlparse(url).netloc.lower().replace("www.", "")
+    return domain_target_mapping.get(domain, None)
 
 def get_embeddings_batched(text_list: list, client: OpenAI) -> list:
     """Batch embeddings — minimizza le chiamate API."""
@@ -240,8 +257,9 @@ def load_sf_export(files) -> pd.DataFrame:
 # MOTORE PRINCIPALE
 # =========================
 if old_files and new_files:
-    d_mapping      = get_domain_map(domain_map_input)
-    forced_mapping = get_domain_map(forced_domain_input)
+    d_mapping            = get_domain_map(domain_map_input)
+    forced_mapping       = get_domain_map(forced_domain_input)
+    domain_target_mapping = get_domain_map(domain_target_input)
 
     df_old_raw = load_sf_export(old_files)
     df_new_raw = load_sf_export(new_files)
@@ -332,6 +350,9 @@ if old_files and new_files:
             forced_lang = get_forced_lang(old_url, forced_mapping)
             match_lang  = forced_lang if forced_lang else old_lang
 
+            # Vincolo dominio: se configurato, restringe il pool solo agli URL del nuovo dominio
+            target_domain = get_target_domain(old_url, domain_target_mapping)
+
             # Pool di destinazione: lingua forzata o stessa lingua
             pool_mask = df_new["lang"] == match_lang
             if not pool_mask.any():
@@ -340,16 +361,36 @@ if old_files and new_files:
             if not pool_mask.any():
                 # Fallback 2: qualsiasi lingua disponibile (mai lista vuota)
                 pool_mask = pd.Series([True] * len(df_new))
+
+            # Applica vincolo dominio sopra al filtro lingua
+            if target_domain:
+                domain_mask = df_new["Address"].apply(
+                    lambda u: urlparse(u).netloc.lower().replace("www.", "") == target_domain
+                )
+                constrained = pool_mask & domain_mask
+                if constrained.any():
+                    pool_mask = constrained
+                elif domain_mask.any():
+                    # se nessun match lingua nel dominio target, usa tutto il dominio target
+                    pool_mask = domain_mask
+
             pool_pos_idxs = np.where(pool_mask.values)[0].tolist()  # indici POSIZIONALI
 
             # Valori di default (usa match_lang per la home corretta)
-            best_url  = home_pages.get(match_lang, home_pages.get("en", df_new.iloc[0]["Address"]))
+            # Se c'è un vincolo dominio, la home di fallback è il primo URL del dominio target
+            if target_domain and pool_pos_idxs:
+                best_url = df_new.iloc[pool_pos_idxs[0]]["Address"]
+            else:
+                best_url = home_pages.get(match_lang, home_pages.get("en", df_new.iloc[0]["Address"]))
             best_score = 0.0
             method     = "Fallback: Home di Lingua"
 
             # ── Regola 0: Home del vecchio sito → Home del nuovo ──────────
             if urlparse(old_url).path.strip("/") == "":
-                best_url   = home_pages.get(match_lang, home_pages.get("en", best_url))
+                if target_domain and pool_pos_idxs:
+                    best_url = df_new.iloc[pool_pos_idxs[0]]["Address"]
+                else:
+                    best_url = home_pages.get(match_lang, home_pages.get("en", best_url))
                 best_score = 1.0
                 method     = "Home → Home"
 
